@@ -115,7 +115,7 @@ Mensajes WS servidor -> cliente: `hello` (raíz, árbol, últimos 500 eventos, s
 - Backup antes de la primera escritura (`.repo-synapse/settings.local.json.bak`) y manifiesto (`.repo-synapse/install.json`) con lo que se creó. Si al desinstalar el contenido coincide con el backup, se restauran los bytes originales; si el archivo no existía, se borra.
 - JSON inválido: se aborta, nunca se sobrescribe. Escritura atómica (temp + rename).
 - `.claude/settings.local.json` y `.repo-synapse/` se agregan a `.git/info/exclude` si git no los ignora ya.
-- `bashEditDiffEnabled`: solo si la fase 0 confirma que llega en el payload HTTP. `start` lo activa en `~/.claude/settings.json` (respetando `CLAUDE_CONFIG_DIR`) si no estaba, y lo revierte al salir.
+- `bashEditDiffEnabled`: solo si la fase 0 confirma que llega en el payload HTTP. `start` lo activa en `~/.claude/settings.json` (respetando `CLAUDE_CONFIG_DIR`) si no estaba, y lo revierte al salir. Varios visores lo comparten: se revierte cuando sale el último (ver I15 en `DECISIONS.md`).
 - `start` instala al arrancar y desinstala con SIGINT/SIGTERM/exit. Lockfile con PID para evitar dos procesos sobre el mismo repo.
 
 ## 9. Frontend

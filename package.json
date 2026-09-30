@@ -20,7 +20,7 @@
     "build:cli": "tsdown",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json",
     "test": "npm run build && npm run test:unit && npm run test:e2e",
-    "test:unit": "vitest run",
+    "test:unit": "vitest run && vitest run --config web/vitest.config.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

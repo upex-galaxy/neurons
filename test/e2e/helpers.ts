@@ -1,0 +1,59 @@
+// Helpers shared by the e2e specs. The page is read through window.__vizState only.
+import { expect, type APIRequestContext, type Page } from '@playwright/test';
+
+/** The subset of web/src/state.ts VizState the specs read (that module needs DOM types). */
+export interface VizStateLite {
+  ready: boolean;
+  mode: 'live' | 'replay' | null;
+  renderer: '3d' | '2d';
+  nodeCount: number;
+  visibleNodeCount: number;
+  active: string[];
+  created: string[];
+  removed: string[];
+  feed: { id: string; action: string; phase: string; path: string; agentId?: string; external?: boolean }[];
+  feedShown: number;
+  counters: Record<string, number | undefined>;
+  failCount: number;
+  fps: number;
+  lastEventLatencyMs: number | null;
+  connected: boolean;
+  replay: { active: boolean; playing: boolean; speed: number; index: number; total: number; elapsedMs: number; durationMs: number };
+}
+
+export function baseUrl(port: number): string {
+  return `http://127.0.0.1:${port}`;
+}
+
+export async function vizState(page: Page): Promise<VizStateLite> {
+  return page.evaluate(() => (globalThis as unknown as { __vizState: VizStateLite }).__vizState);
+}
+
+/** Opens the page and waits for the first layout and, in live mode, the socket. */
+export async function openViewer(page: Page, port: number, query = ''): Promise<void> {
+  await page.goto(`${baseUrl(port)}/${query}`);
+  await expect
+    .poll(async () => {
+      const s = await vizState(page);
+      return s.ready && (s.mode === 'replay' || s.connected);
+    }, { timeout: 30_000 })
+    .toBe(true);
+}
+
+/** POSTs one raw payload like Claude Code does and checks the 204 with an empty body. */
+export async function postHook(request: APIRequestContext, port: number, body: string): Promise<void> {
+  const res = await request.post(`${baseUrl(port)}/hook?src=repo-synapse`, {
+    headers: { 'content-type': 'application/json' },
+    data: body,
+  });
+  expect(res.status()).toBe(204);
+  expect((await res.body()).length).toBe(0);
+}
+
+export function counter(s: VizStateLite, action: string): number {
+  return s.counters[action] ?? 0;
+}
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
