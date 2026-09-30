@@ -332,6 +332,118 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
   });
 
+  it('a lock whose PID was reused by an unrelated process is stale for start and doctor (F7)', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    // A live process that started long after the lock was written cannot be its owner.
+    const squatter = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    children.push(squatter);
+    fs.mkdirSync(path.join(repo, '.repo-synapse'));
+    const lockFile = path.join(repo, '.repo-synapse', 'lock');
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: squatter.pid, startedAt: '2001-01-01T00:00:00.000Z' }) + '\n');
+
+    const doctor = run(['doctor', repo], cfg);
+    expect((await doctor.exited).code).toBe(0);
+    expect(doctor.output()).toContain('lock viejo');
+    expect(doctor.output()).not.toContain('está corriendo sobre este repo');
+
+    const r = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff', '--no-install'], cfg);
+    await r.waitFor(READY);
+    expect(r.output()).toContain('lock viejo');
+    expect(JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid).toBe(r.child.pid);
+    r.child.kill('SIGINT');
+    expect((await r.exited).code).toBe(0);
+    expect(fs.readdirSync(path.join(repo, '.repo-synapse')).filter((f) => f.startsWith('lock'))).toEqual([]);
+  });
+
+  it('the refusal of a live lock says how to recover (F7)', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    const first = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff', '--no-install'], cfg);
+    await first.waitFor(READY);
+    const second = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff', '--no-install'], cfg);
+    expect((await second.exited).code).toBe(1);
+    expect(second.output()).toContain('Ya hay un repo-synapse corriendo');
+    expect(second.output()).toContain(`borrá ${path.join(repo, '.repo-synapse', 'lock')}`);
+    first.child.kill('SIGINT');
+    expect((await first.exited).code).toBe(0);
+  });
+
+  it('several starts racing on a stale lock: exactly one takes it over (F8)', async () => {
+    for (let round = 0; round < 3; round++) {
+      const repo = gitRepo();
+      const cfg = tmp('rs-cli-cfg-');
+      fs.mkdirSync(path.join(repo, '.repo-synapse'));
+      const lockFile = path.join(repo, '.repo-synapse', 'lock');
+      fs.writeFileSync(lockFile, JSON.stringify({ pid: 2 ** 22 + 4321, startedAt: '2001-01-01T00:00:00.000Z' }));
+      const racers = [0, 1, 2, 3, 4].map(() => run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff'], cfg));
+      const settled = await Promise.all(
+        racers.map((r) =>
+          r.waitFor(READY, 15_000).then(
+            () => 'ready' as const,
+            () => 'exited' as const,
+          ),
+        ),
+      );
+      const winners = racers.filter((_, i) => settled[i] === 'ready');
+      const losers = racers.filter((_, i) => settled[i] === 'exited');
+      expect(winners).toHaveLength(1);
+      for (const l of losers) {
+        expect((await l.exited).code).toBe(1);
+        expect(l.output()).toMatch(/Ya hay un repo-synapse corriendo|otro repo-synapse está arrancando/);
+      }
+      const winner = winners[0]!;
+      expect(JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid).toBe(winner.child.pid);
+      const port = Number(winner.output().match(READY)![1]);
+      expect(ownUrls(path.join(repo, '.claude', 'settings.local.json')).every((o) => o.url === hookUrl(port))).toBe(true);
+      winner.child.kill('SIGINT');
+      expect((await winner.exited).code).toBe(0);
+      expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
+      expect(fs.readdirSync(path.join(repo, '.repo-synapse')).filter((f) => f.startsWith('lock'))).toEqual([]);
+    }
+  }, 60_000);
+
+  it('install refuses while a start is live and leaves its hooks alone (F9)', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    const r = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff'], cfg);
+    const port = Number((await r.waitFor(READY))[1]);
+    const settings = path.join(repo, '.claude', 'settings.local.json');
+    const before = fs.readFileSync(settings, 'utf8');
+    const manifest = path.join(repo, '.repo-synapse', 'install.json');
+    const manifestBefore = fs.readFileSync(manifest, 'utf8');
+
+    const inst = run(['install', repo, '--port', '7'], cfg);
+    expect((await inst.exited).code).toBe(1);
+    expect(inst.output()).toContain('repo-synapse está corriendo');
+    expect(fs.readFileSync(settings, 'utf8')).toBe(before);
+    expect(fs.readFileSync(manifest, 'utf8')).toBe(manifestBefore);
+    expect(ownUrls(settings).every((o) => o.url === hookUrl(port))).toBe(true);
+
+    r.child.kill('SIGINT');
+    expect((await r.exited).code).toBe(0);
+  });
+
+  // Regression (F9 follow-up): with a live `start --no-install`, install refused and claimed
+  // that hooks were installed when there were none.
+  it('install works while a start --no-install is live (it installed nothing)', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    const r = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff', '--no-install'], cfg);
+    await r.waitFor(READY);
+    const inst = run(['install', repo, '--port', '7'], cfg);
+    expect((await inst.exited).code).toBe(0);
+    const settings = path.join(repo, '.claude', 'settings.local.json');
+    expect(ownUrls(settings).length).toBeGreaterThan(0);
+    expect(ownUrls(settings).every((o) => o.url === hookUrl(7))).toBe(true);
+    r.child.kill('SIGINT');
+    expect((await r.exited).code).toBe(0);
+    // The hooks were installed by hand, so they outlive the viewer.
+    expect(ownUrls(settings).every((o) => o.url === hookUrl(7))).toBe(true);
+    const un = run(['uninstall', repo], cfg);
+    expect((await un.exited).code).toBe(0);
+  });
+
   it('install and uninstall work as manual commands', () => {
     const repo = gitRepo();
     const cfg = tmp('rs-cli-cfg-');

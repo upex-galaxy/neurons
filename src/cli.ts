@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startSynapseServer, type SynapseServer } from './server/server.ts';
 import {
+  acquireLockSync,
   checkEnvironmentSync,
   enableBashEditDiffSync,
   ensureGitExcluded,
@@ -226,23 +227,22 @@ function excludeStateDir(repo: string): void {
   }
 }
 
-/** Takes the lock or fails. A stale lock (dead PID) is taken over after undoing its install. */
+/** Takes the repo's lock or fails (see acquireLockSync). */
 function acquireLock(repo: string): void {
-  fs.mkdirSync(stateDir(repo), { recursive: true });
-  const file = lockPath(repo);
-  const data = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }) + '\n';
-  try {
-    fs.writeFileSync(file, data, { flag: 'wx' });
+  const r = acquireLockSync(repo);
+  if (r.ok) {
+    if (r.tookOver !== undefined) {
+      out(`Se encontró un lock viejo (PID ${r.tookOver || '?'}, ya no es de repo-synapse): se toma el control.`);
+    }
     return;
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
   }
-  const lock = readLock(repo);
-  if (lock?.alive && lock.pid !== process.pid) {
-    fail(`Ya hay un repo-synapse corriendo sobre ${repo} (PID ${lock.pid}). Cerralo antes de abrir otro.`);
+  if (r.reason === 'live') {
+    fail(
+      `Ya hay un repo-synapse corriendo sobre ${repo} (PID ${r.pid}). Cerralo antes de abrir otro.\n` +
+        `Si ese proceso no es repo-synapse, borrá ${lockPath(repo)} y volvé a intentar.`,
+    );
   }
-  out(`Se encontró un lock viejo (PID ${lock?.pid ?? '?'}, ya no existe): se toma el control.`);
-  fs.writeFileSync(file, data);
+  fail(`No se pudo tomar el lock de ${repo}: otro repo-synapse está arrancando sobre el mismo repo.`);
 }
 
 function releaseLock(repo: string): void {
@@ -398,6 +398,16 @@ async function cmdStart(positionals: string[], o: Options): Promise<number> {
 
 function cmdInstall(positionals: string[], o: Options): number {
   const repo = resolveRepo(positionals[0]);
+  // A live start already installed hooks pointing at the port it really listens on
+  // (maybe a fallback): rewriting them to --port would cut it off from Claude Code.
+  // Without a manifest the live start runs with --no-install: there is nothing to protect.
+  const lock = readLock(repo);
+  if (lock?.alive && lock.pid !== process.pid && readManifest(repo)) {
+    fail(
+      `repo-synapse está corriendo sobre ${repo} (PID ${lock.pid}) y sus hooks ya están instalados: no se tocan.\n` +
+        'Cerralo antes de instalar los hooks a mano.',
+    );
+  }
   const r = installHooksSync({ repoRoot: repo, port: o.port });
   out(`Hooks instalados en ${r.settingsPath} (puerto ${o.port}).`);
   out(`Mientras no haya un servidor en el puerto ${o.port}, Claude Code va a mostrar "hook error" en cada herramienta.`);

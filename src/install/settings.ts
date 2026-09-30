@@ -723,21 +723,201 @@ export function isPidAlive(pid: number): boolean {
   }
 }
 
-/** Reads <repo>/.repo-synapse/lock ({"pid":N,...} or a bare number). */
-export function readLock(repoRoot: string): { pid: number; alive: boolean } | null {
-  const raw = readBytes(lockPath(repoRoot));
-  if (!raw) return null;
+/** Slack for the 1 s resolution of `ps -o etime` and for clock jitter. */
+const LOCK_START_SLACK_MS = 5000;
+
+/**
+ * When `pid` started (epoch ms), from `ps -o etime=` ([[dd-]hh:]mm:ss, locale independent).
+ * undefined when it cannot be known (Windows, no ps, process gone).
+ */
+export function processStartMs(pid: number): number | undefined {
+  if (process.platform === 'win32' || !Number.isInteger(pid) || pid <= 0) return undefined;
+  const now = Date.now();
+  let text: string;
+  try {
+    text = execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2000,
+    }).trim();
+  } catch {
+    return undefined;
+  }
+  const m = /^(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)$/.exec(text);
+  if (!m) return undefined;
+  const [days, hours, mins, secs] = [m[1], m[2], m[3], m[4]].map((x) => Number(x ?? 0)) as [number, number, number, number];
+  return now - (((days * 24 + hours) * 60 + mins) * 60 + secs) * 1000;
+}
+
+/** Command line of `pid` (`ps -o command=`), undefined when it cannot be read. */
+function processCommand(pid: number): string | undefined {
+  if (process.platform === 'win32') return undefined;
+  try {
+    const text = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2000,
+    }).trim();
+    return text === '' ? undefined : text;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface LockInfo {
+  pid: number;
+  alive: boolean;
+}
+
+/**
+ * Parses a lock's bytes ({"pid":N,"startedAt":ISO,"cmd":script} or a bare number).
+ * `alive` also requires the process to be the lock's owner: a PID reused after a crash
+ * or a reboot belongs to a process that started after the lock was written. A process
+ * whose command line still names the lock's script is taken as the owner anyway, since a
+ * wall-clock step after start (NTP, VM resume) also moves the start time `ps` reports.
+ */
+export function lockStatus(raw: Buffer): LockInfo {
   const text = raw.toString('utf8').trim();
   let pid = Number.NaN;
+  let startedAt = Number.NaN;
+  let cmd: string | undefined;
   try {
     const v: unknown = JSON.parse(text);
     if (typeof v === 'number') pid = v;
-    else if (isPlainObject(v) && typeof v.pid === 'number') pid = v.pid;
+    else if (isPlainObject(v) && typeof v.pid === 'number') {
+      pid = v.pid;
+      if (typeof v.startedAt === 'string') startedAt = Date.parse(v.startedAt);
+      if (typeof v.cmd === 'string' && v.cmd.length > 0) cmd = v.cmd;
+    }
   } catch {
     pid = Number.parseInt(text, 10);
   }
   if (!Number.isInteger(pid)) return { pid: 0, alive: false };
-  return { pid, alive: isPidAlive(pid) };
+  if (!isPidAlive(pid)) return { pid, alive: false };
+  if (pid !== process.pid && Number.isFinite(startedAt)) {
+    const procStart = processStartMs(pid);
+    if (procStart !== undefined && procStart > startedAt + LOCK_START_SLACK_MS) {
+      const alive = cmd !== undefined && (processCommand(pid)?.includes(cmd) ?? false);
+      return { pid, alive };
+    }
+  }
+  return { pid, alive: true };
+}
+
+/** Reads <repo>/.repo-synapse/lock; null when there is none. See lockStatus. */
+export function readLock(repoRoot: string): LockInfo | null {
+  const raw = readBytes(lockPath(repoRoot));
+  return raw ? lockStatus(raw) : null;
+}
+
+/**
+ * Creates `file` only if it does not exist, with its full content in place from the first
+ * instant (temp file + hard link), so a racing reader never sees it empty or partial.
+ */
+function createExclusive(file: string, data: string): boolean {
+  const tmpFile = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  fs.writeFileSync(tmpFile, data, { flag: 'wx' });
+  try {
+    fs.linkSync(tmpFile, file);
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    // No hard links on this file system: fall back to an exclusive create.
+    try {
+      fs.writeFileSync(file, data, { flag: 'wx' });
+      return true;
+    } catch (e2) {
+      if ((e2 as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw e2;
+    }
+  } finally {
+    fs.rmSync(tmpFile, { force: true });
+  }
+}
+
+/** A takeover guard older than this, or whose PID is gone, was left by a crash. */
+const TAKEOVER_GUARD_STALE_MS = 10_000;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Removes a stale lock, but only while it still holds `expected`. Takeovers are serialized
+ * behind an exclusive guard file: holding it, nobody else can remove the lock, and nobody
+ * can create one while the stale one is there, so the check and the removal cannot be
+ * interleaved with another start's. A fresh lock is never moved or deleted.
+ */
+function removeStaleLock(file: string, expected: Buffer): 'removed' | 'changed' | 'busy' {
+  const guard = `${file}.takeover`;
+  if (!createExclusive(guard, JSON.stringify({ pid: process.pid }) + '\n')) {
+    clearCrashedGuard(guard);
+    return 'busy';
+  }
+  try {
+    const current = readBytes(file);
+    if (!current || !current.equals(expected)) return 'changed';
+    fs.rmSync(file, { force: true });
+    return 'removed';
+  } finally {
+    fs.rmSync(guard, { force: true });
+  }
+}
+
+/** Deletes a takeover guard whose holder died inside its (microseconds long) critical section. */
+function clearCrashedGuard(guard: string): void {
+  let st: fs.Stats;
+  let raw: Buffer | undefined;
+  try {
+    st = fs.statSync(guard);
+    raw = readBytes(guard);
+  } catch {
+    return;
+  }
+  let pid = 0;
+  try {
+    const v: unknown = JSON.parse(raw?.toString('utf8') ?? '');
+    if (isPlainObject(v) && typeof v.pid === 'number') pid = v.pid;
+  } catch {
+    /* unreadable: judged by age alone */
+  }
+  const crashed = (pid > 0 && !isPidAlive(pid)) || Date.now() - st.mtimeMs > TAKEOVER_GUARD_STALE_MS;
+  if (crashed) fs.rmSync(guard, { force: true });
+}
+
+export type LockAcquireResult =
+  | { ok: true; /** PID of the stale lock that was replaced. */ tookOver?: number }
+  | { ok: false; reason: 'live'; pid: number }
+  | { ok: false; reason: 'busy' };
+
+/**
+ * Takes <repo>/.repo-synapse/lock for this process. A stale lock (dead PID, or a PID
+ * reused by a process that is not its owner) is taken over; any number of starts racing
+ * on it end with exactly one owner. `busy`: other starts kept the lock in flux until
+ * `timeoutMs`.
+ */
+export function acquireLockSync(repoRoot: string, o: { timeoutMs?: number } = {}): LockAcquireResult {
+  fs.mkdirSync(stateDir(repoRoot), { recursive: true });
+  const file = lockPath(repoRoot);
+  const own: Record<string, unknown> = { pid: process.pid, startedAt: new Date().toISOString() };
+  if (process.argv[1]) own.cmd = process.argv[1];
+  const data = JSON.stringify(own) + '\n';
+  const deadline = Date.now() + (o.timeoutMs ?? 3000);
+  let tookOver: number | undefined;
+  for (;;) {
+    if (createExclusive(file, data)) return tookOver === undefined ? { ok: true } : { ok: true, tookOver };
+    const raw = readBytes(file);
+    let wait = false;
+    if (raw) {
+      const lock = lockStatus(raw);
+      if (lock.alive && lock.pid !== process.pid) return { ok: false, reason: 'live', pid: lock.pid };
+      const r = removeStaleLock(file, raw);
+      if (r === 'removed') tookOver = lock.pid;
+      wait = r === 'busy';
+    }
+    if (Date.now() > deadline) return { ok: false, reason: 'busy' };
+    if (wait) sleepSync(5 + Math.floor(Math.random() * 10));
+  }
 }
 
 // ---------------------------------------------------------------- doctor
@@ -853,7 +1033,7 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
       status: lock.alive ? 'info' : 'warn',
       message: lock.alive
         ? `repo-synapse está corriendo sobre este repo (PID ${lock.pid}).`
-        : `Hay un lock viejo (PID ${lock.pid}, ya no existe). El próximo "start" lo reemplaza.`,
+        : `Hay un lock viejo (PID ${lock.pid}, ya no es de repo-synapse). El próximo "start" lo reemplaza.`,
     });
   }
 

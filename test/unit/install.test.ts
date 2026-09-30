@@ -1,10 +1,12 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   HOOK_EVENTS,
+  acquireLockSync,
+  lockStatus,
   checkEnvironmentSync,
   bashDiffStateDir,
   enableBashEditDiff,
@@ -24,6 +26,8 @@ import {
   urlPatternMatches,
   userSettingsPath,
 } from '../../src/install/settings.ts';
+
+const SETTINGS_TS = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../src/install/settings.ts');
 
 const tmpDirs: string[] = [];
 let cfgDir: string;
@@ -563,4 +567,117 @@ describe('checkEnvironment', () => {
     expect(noProxyCovers('localhost')).toBe(false);
     expect(noProxyCovers(undefined)).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------- lock
+
+describe('acquireLockSync', () => {
+  const kids: ChildProcess[] = [];
+  const dead = 2 ** 22 + 4321;
+
+  afterAll(() => {
+    for (const k of kids) if (k.exitCode === null && k.signalCode === null) k.kill('SIGKILL');
+  });
+
+  function sleeper(): ChildProcess {
+    const k = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    kids.push(k);
+    return k;
+  }
+
+  function lockFiles(repo: string): string[] {
+    return fs.readdirSync(path.join(repo, '.repo-synapse')).filter((f) => f.startsWith('lock')).sort();
+  }
+
+  function writeLock(repo: string, v: unknown): string {
+    fs.mkdirSync(path.join(repo, '.repo-synapse'), { recursive: true });
+    const file = path.join(repo, '.repo-synapse', 'lock');
+    fs.writeFileSync(file, JSON.stringify(v) + '\n');
+    return file;
+  }
+
+  it('creates the lock with pid, start time and script, and takes over a dead one', () => {
+    const repo = gitRepo();
+    expect(acquireLockSync(repo)).toEqual({ ok: true });
+    const file = path.join(repo, '.repo-synapse', 'lock');
+    const own = JSON.parse(fs.readFileSync(file, 'utf8'));
+    expect(own).toMatchObject({ pid: process.pid, cmd: process.argv[1] });
+    expect(Number.isFinite(Date.parse(own.startedAt))).toBe(true);
+
+    writeLock(repo, { pid: dead, startedAt: '2001-01-01T00:00:00.000Z' });
+    expect(acquireLockSync(repo)).toEqual({ ok: true, tookOver: dead });
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).pid).toBe(process.pid);
+    expect(lockFiles(repo)).toEqual(['lock']);
+  });
+
+  it('refuses a live owner and leaves its lock alone', async () => {
+    const repo = gitRepo();
+    const k = sleeper();
+    await new Promise((r) => setTimeout(r, 100));
+    const file = writeLock(repo, { pid: k.pid, startedAt: new Date().toISOString() });
+    const before = fs.readFileSync(file);
+    expect(acquireLockSync(repo)).toEqual({ ok: false, reason: 'live', pid: k.pid });
+    expect(fs.readFileSync(file).equals(before)).toBe(true);
+  });
+
+  // Regression (F7 follow-up): a wall-clock step after start made a live owner read as stale.
+  it('a process that started after startedAt owns the lock only if its command line names the lock script', async () => {
+    const k = sleeper();
+    await new Promise((r) => setTimeout(r, 100));
+    const old = '2001-01-01T00:00:00.000Z';
+    expect(lockStatus(Buffer.from(JSON.stringify({ pid: k.pid, startedAt: old })))).toEqual({ pid: k.pid, alive: false });
+    expect(lockStatus(Buffer.from(JSON.stringify({ pid: k.pid, startedAt: old, cmd: 'setTimeout' })))).toEqual({ pid: k.pid, alive: true });
+    expect(lockStatus(Buffer.from(JSON.stringify({ pid: k.pid, startedAt: old, cmd: '/nowhere/cli.mjs' })))).toEqual({ pid: k.pid, alive: false });
+  });
+
+  // Regression (F8 follow-up): the takeover moved the lock aside before checking it, so a
+  // third start could slip in while a fresh lock was missing and two starts both won.
+  it('waits for a takeover in progress instead of touching the lock', () => {
+    const repo = gitRepo();
+    const file = writeLock(repo, { pid: dead });
+    fs.writeFileSync(`${file}.takeover`, JSON.stringify({ pid: process.pid }) + '\n');
+    const before = fs.readFileSync(file);
+    expect(acquireLockSync(repo, { timeoutMs: 100 })).toEqual({ ok: false, reason: 'busy' });
+    expect(fs.readFileSync(file).equals(before)).toBe(true);
+    fs.rmSync(`${file}.takeover`);
+    expect(acquireLockSync(repo)).toEqual({ ok: true, tookOver: dead });
+  });
+
+  it('clears a takeover guard left by a crashed start', () => {
+    const repo = gitRepo();
+    const file = writeLock(repo, { pid: dead });
+    fs.writeFileSync(`${file}.takeover`, JSON.stringify({ pid: dead + 1 }) + '\n');
+    expect(acquireLockSync(repo)).toEqual({ ok: true, tookOver: dead });
+    expect(lockFiles(repo)).toEqual(['lock']);
+  });
+
+  it('any number of processes racing on a stale lock: exactly one owner', async () => {
+    const racer = `
+      const { acquireLockSync } = await import(${JSON.stringify(SETTINGS_TS)});
+      const [repo, at] = process.argv.slice(1);
+      while (Date.now() < Number(at)) {}
+      const r = acquireLockSync(repo);
+      process.stdout.write(JSON.stringify(r));
+      setTimeout(() => {}, r.ok ? 1500 : 0);
+    `;
+    for (let round = 0; round < 4; round++) {
+      const repo = gitRepo();
+      writeLock(repo, { pid: dead, startedAt: '2001-01-01T00:00:00.000Z' });
+      const at = String(Date.now() + 600);
+      const runs = Array.from({ length: 8 }, () => {
+        const k = spawn(process.execPath, ['--input-type=module', '-e', racer, repo, at], { stdio: ['ignore', 'pipe', 'inherit'] });
+        kids.push(k);
+        let text = '';
+        k.stdout!.on('data', (d: Buffer) => (text += d.toString()));
+        return new Promise<{ pid: number; r: { ok: boolean } }>((resolve) =>
+          k.stdout!.on('end', () => resolve({ pid: k.pid!, r: JSON.parse(text) })),
+        );
+      });
+      const results = await Promise.all(runs);
+      const winners = results.filter((x) => x.r.ok);
+      expect(winners).toHaveLength(1);
+      expect(JSON.parse(fs.readFileSync(path.join(repo, '.repo-synapse', 'lock'), 'utf8')).pid).toBe(winners[0]!.pid);
+      expect(lockFiles(repo)).toEqual(['lock']);
+    }
+  }, 30_000);
 });
