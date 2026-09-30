@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>repo-synapse</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='5' fill='%2322d3ee'/%3E%3Ccircle cx='6' cy='8' r='2.5' fill='%233b82f6'/%3E%3Ccircle cx='26' cy='9' r='2.5' fill='%23a855f7'/%3E%3Ccircle cx='24' cy='25' r='2.5' fill='%2322c55e'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <header id="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <strong>repo-synapse</strong>
+        <span id="repo-name" class="repo-name">—</span>
+        <span id="mode" class="chip">En vivo</span>
+        <span id="truncated" class="chip warn" hidden>Árbol truncado</span>
+      </div>
+      <div class="meta">
+        <span id="node-count">0 nodos</span>
+        <span id="fps">0 fps</span>
+        <button id="replay-open" class="btn" type="button">Reproducir log</button>
+        <span id="status" class="status" data-status="connecting">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="status-text">Conectando…</span>
+        </span>
+        <button id="panel-toggle" class="btn" type="button" aria-controls="panel" aria-expanded="true">Panel</button>
+      </div>
+    </header>
+
+    <main id="stage">
+      <div id="graph" aria-label="Grafo del repositorio"></div>
+
+      <div id="replay-bar" class="replay-bar" role="region" aria-label="Controles de repetición" hidden>
+        <div class="rp-row">
+          <button id="rp-play" class="btn primary" type="button" aria-pressed="false">Reproducir</button>
+          <button id="rp-restart" class="btn" type="button">Reiniciar</button>
+          <div class="speeds" role="group" aria-label="Velocidad">
+            <button class="btn" type="button" data-speed="1" aria-pressed="true">1x</button>
+            <button class="btn" type="button" data-speed="2" aria-pressed="false">2x</button>
+            <button class="btn" type="button" data-speed="5" aria-pressed="false">5x</button>
+          </div>
+          <span id="rp-time" class="rp-time">00:00 / 00:00</span>
+          <span id="rp-clock" class="rp-clock" title="Hora original del log"></span>
+          <select id="rp-segment" aria-label="Tramo del log" hidden></select>
+          <button id="rp-exit" class="btn" type="button">Volver al vivo</button>
+        </div>
+        <div
+          id="rp-progress"
+          class="progress"
+          role="slider"
+          tabindex="0"
+          aria-label="Progreso de la repetición"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div id="rp-fill" class="fill"></div>
+        </div>
+        <p id="rp-note" class="rp-note" hidden></p>
+        <p id="rp-msg" class="rp-note warn" hidden></p>
+      </div>
+    </main>
+
+    <aside id="panel" aria-label="Actividad">
+      <section class="filters">
+        <h2>Filtros</h2>
+        <label class="field">
+          <span>Sesión</span>
+          <select id="f-session"></select>
+        </label>
+        <label class="field">
+          <span>Agente</span>
+          <select id="f-agent"></select>
+        </label>
+        <label class="toggle">
+          <input id="f-external" type="checkbox" checked />
+          <span>Mostrar cambios externos</span>
+        </label>
+        <div class="view-toggle" role="group" aria-label="Vista">
+          <button class="btn" type="button" data-view="3d" aria-pressed="true">3D</button>
+          <button class="btn" type="button" data-view="2d" aria-pressed="false">2D</button>
+        </div>
+      </section>
+      <section>
+        <h2>Contadores</h2>
+        <ul id="counters" class="counters"></ul>
+      </section>
+      <section class="feed-section">
+        <h2>Actividad</h2>
+        <p id="feed-empty" class="empty">Esperando actividad de Claude Code…</p>
+        <ul id="feed" class="feed" aria-live="off"></ul>
+      </section>
+      <section class="legend-section">
+        <details>
+          <summary>Leyenda</summary>
+          <ul id="legend" class="legend"></ul>
+        </details>
+      </section>
+    </aside>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
