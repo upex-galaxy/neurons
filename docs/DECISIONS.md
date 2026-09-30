@@ -30,3 +30,6 @@ Registro de decisiones con su motivo. Las marcadas "ronda" salen de la ronda de 
 | I4 | La sesión se crea con el primer evento que trae un `session_id` nuevo | `SessionStart` no admite hooks HTTP |
 | I5 | Búsquedas detectadas clasificando comandos Bash | En el build nativo de macOS no existen las herramientas Glob/Grep |
 | I6 | `.claude/settings.local.json` y `.repo-synapse/` van a `.git/info/exclude` si git no los ignora | No se asume el auto-gitignore; `info/exclude` no toca archivos versionados |
+| I7 | `bashEditDiffEnabled` se activa en `~/.claude/settings.json` (o en `$CLAUDE_CONFIG_DIR/settings.json`) mientras corre `start`, y se revierte al salir, solo si no estaba ya | Fase 0: el campo llega en el payload HTTP pero solo si la clave está en la config de usuario; en `settings.local.json` se ignora |
+| I8 | Rutas de resultados de búsqueda extraídas de `stdout` de Bash (líneas `ruta` o `ruta:línea:`), validadas contra el índice del árbol | Es la única fuente de resultados en el build nativo; el texto nunca sale del servidor |
+| I9 | No verificado: si los hooks agregados a `settings.local.json` con una sesión interactiva ya abierta se aplican sin reiniciar | `-p` no permite probarlo. `DEMO.md` indica arrancar el visor antes que Claude |
