@@ -83,6 +83,28 @@ describe('classifyBash', () => {
     expect(classifyBash('rm a.ts').cdDir).toBeUndefined();
   });
 
+  // Regression: mv lost which argument was the destination, and find roots looked like delete targets.
+  it('splits each mv into sources and destination', () => {
+    expect(classifyBash('git mv docs/old.md docs/notes.md').moves).toEqual([{ sources: ['docs/old.md'], dest: 'docs/notes.md', intoDir: false }]);
+    expect(classifyBash('mv a b dir').moves).toEqual([{ sources: ['a', 'b'], dest: 'dir', intoDir: true }]);
+    expect(classifyBash('mv a dir/').moves).toEqual([{ sources: ['a'], dest: 'dir/', intoDir: true }]);
+    expect(classifyBash('mv -t dest a b').moves).toEqual([{ sources: ['a', 'b'], dest: 'dest', intoDir: true }]);
+    expect(classifyBash('mv --target-directory=dest a').moves).toEqual([{ sources: ['a'], dest: 'dest', intoDir: true }]);
+    expect(classifyBash('mv -T a b').moves).toEqual([{ sources: ['a'], dest: 'b', intoDir: false }]);
+    expect(classifyBash('cd pkg && mv x y && git -C sub mv p q').moves).toEqual([
+      { sources: ['pkg/x'], dest: 'pkg/y', intoDir: false },
+      { sources: ['pkg/sub/p'], dest: 'pkg/sub/q', intoDir: false },
+    ]);
+    expect(classifyBash('mv onlyone').moves).toEqual([]);
+    expect(classifyBash('rm a').moves).toBeUndefined();
+  });
+
+  it('marks find -delete roots as bases, not targets', () => {
+    expect(classifyBash('find src -name "*.orig" -delete').bases).toEqual(['src']);
+    expect(classifyBash('rm a && cd lib && find . -delete').bases).toEqual(['lib']);
+    expect(classifyBash('rm -rf dist').bases).toBeUndefined();
+  });
+
   it('never throws on odd input', () => {
     for (const cmd of ['"unterminated', "'x", 'a && && b', '$(', '`', 'rm \\', ')(', '<<EOF', '> x']) {
       expect(() => classifyBash(cmd)).not.toThrow();

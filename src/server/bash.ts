@@ -11,6 +11,17 @@ export interface BashClassification {
   pattern?: string;
   /** Directory set by a `cd`/`pushd` in effect for the first relevant segment (relative to the Bash cwd, or absolute). */
   cdDir?: string;
+  /** For `move`: each mv / git mv as sources and destination (prefixed like pathArgs). */
+  moves?: BashMove[];
+  /** For `delete`: pathArgs that are search roots (`find <root> -delete`), not deleted themselves. */
+  bases?: string[];
+}
+
+export interface BashMove {
+  sources: string[];
+  dest: string;
+  /** True when `dest` is certainly a directory the sources go into (-t, trailing slash, several sources). */
+  intoDir: boolean;
 }
 
 type Kind = BashClassification['kind'];
@@ -283,6 +294,21 @@ interface SegmentResult {
   pattern?: string;
   /** Directory prefix the args are relative to (git -C). */
   dir?: string;
+  moves?: BashMove[];
+  bases?: string[];
+}
+
+/** Sources and destination of one mv / git mv argv. */
+function mvMoves(parsed: ParsedArgs): BashMove[] {
+  const target = parsed.values.get('-t')?.at(-1) ?? parsed.values.get('--target-directory')?.at(-1);
+  if (target !== undefined) {
+    return parsed.positional.length > 0 ? [{ sources: parsed.positional, dest: target, intoDir: true }] : [];
+  }
+  if (parsed.positional.length < 2) return [];
+  const sources = parsed.positional.slice(0, -1);
+  const dest = parsed.positional[parsed.positional.length - 1] as string;
+  const noTargetDir = parsed.flags.has('-T') || parsed.flags.has('--no-target-directory');
+  return [{ sources, dest, intoDir: !noTargetDir && (sources.length > 1 || dest.endsWith('/')) }];
 }
 
 function commandName(w: string): string {
@@ -375,7 +401,8 @@ function findLike(args: string[]): SegmentResult {
     if (pattern === undefined && FIND_PATTERN_FLAGS.has(a) && j + 1 < args.length) pattern = args[j + 1];
     if (a === '-delete') del = true;
   }
-  return { kind: del ? 'delete' : 'search', args: paths, pattern };
+  // `find <root> -delete` removes what matches under the roots, not the roots themselves.
+  return del ? { kind: 'delete', args: paths, bases: paths, pattern } : { kind: 'search', args: paths, pattern };
 }
 
 function analyzeGit(args: string[]): SegmentResult {
@@ -408,9 +435,11 @@ function analyzeGit(args: string[]): SegmentResult {
     case 'rm':
       res = { kind: 'delete', args: parseArgs(rest, new Set()).positional };
       break;
-    case 'mv':
-      res = { kind: 'move', args: parseArgs(rest, new Set()).positional };
+    case 'mv': {
+      const parsed = parseArgs(rest, new Set());
+      res = { kind: 'move', args: parsed.positional, moves: mvMoves(parsed) };
       break;
+    }
     default:
       res = { kind: 'other', args: [] };
   }
@@ -453,8 +482,10 @@ function analyzeSegment(argv: string[]): SegmentResult {
     case 'trash':
     case 'trash-put':
       return { kind: 'delete', args: parseArgs(args, new Set()).positional };
-    case 'mv':
-      return { kind: 'move', args: parseArgs(args, MV_VALUE_FLAGS).positional };
+    case 'mv': {
+      const parsed = parseArgs(args, MV_VALUE_FLAGS);
+      return { kind: 'move', args: parsed.positional, moves: mvMoves(parsed) };
+    }
     case 'git':
       return analyzeGit(args);
     default:
@@ -499,6 +530,8 @@ export function classifyBash(command: string): BashClassification {
 
   const pathArgs: string[] = [];
   const seen = new Set<string>();
+  const moves: BashMove[] = [];
+  const bases: string[] = [];
   let pattern: string | undefined;
   let firstCd: string | undefined;
   let first = true;
@@ -517,10 +550,16 @@ export function classifyBash(command: string): BashClassification {
         pathArgs.push(p);
       }
     }
+    for (const m of res.moves ?? []) {
+      moves.push({ sources: m.sources.map((a) => withPrefix(a, prefix)), dest: withPrefix(m.dest, prefix), intoDir: m.intoDir });
+    }
+    for (const b of res.bases ?? []) bases.push(withPrefix(b, prefix));
   }
   const out: BashClassification = { kind, pathArgs };
   if (pattern !== undefined) out.pattern = pattern;
   if (firstCd !== undefined) out.cdDir = firstCd;
+  if (kind === 'move') out.moves = moves;
+  if (kind === 'delete' && bases.length > 0) out.bases = bases;
   return out;
 }
 

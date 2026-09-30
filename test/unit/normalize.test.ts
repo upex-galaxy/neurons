@@ -170,7 +170,7 @@ describe('Normalizer with real fixtures (run1)', () => {
 
   it('Bash git mv -> move; bashEditDiff created+deleted pair -> one move with fromPaths', async () => {
     const { perPayload } = await runFixture('run1.jsonl');
-    expect(main(perPayload[21] as VizEvent[])).toMatchObject({ action: 'move', phase: 'pre', paths: ['docs/old.md', 'docs/notes.md'] });
+    expect(main(perPayload[21] as VizEvent[])).toMatchObject({ action: 'move', phase: 'pre', paths: ['docs/notes.md'], fromPaths: ['docs/old.md'] });
     const post = main(perPayload[22] as VizEvent[]);
     expect(post).toMatchObject({ action: 'move', phase: 'post', paths: ['docs/notes.md'], fromPaths: ['docs/old.md'] });
   });
@@ -330,7 +330,37 @@ describe('Normalizer: other rules', () => {
     const cmd = { command: 'cd src && rm utils/legacy.ts' };
     expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'b2', tool_input: cmd })))).toMatchObject({ action: 'delete', phase: 'pre', paths: ['src/utils/legacy.ts'] });
     expect(main(normalizer.normalize(ev({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'b2', tool_input: cmd, tool_response: { stdout: '' } })))).toMatchObject({ action: 'delete', phase: 'post', paths: ['src/utils/legacy.ts'] });
-    expect(main(normalizer.normalize(ev({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'b3', tool_input: { command: 'mv a.ts b.ts' }, error: 'x' })))).toMatchObject({ action: 'move', phase: 'fail', paths: ['a.ts', 'b.ts'] });
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'b3', tool_input: { command: 'mv a.ts b.ts' }, error: 'x' })))).toMatchObject({ action: 'move', phase: 'fail', paths: ['b.ts'], fromPaths: ['a.ts'] });
+  });
+
+  // Regression: globs, find roots and `rm -rf .` used to mark a surviving dir (or the root) as deleted,
+  // and mv put its source in `paths` with no fromPaths.
+  it('Bash rm/find -delete without literal targets -> bash on the dirs involved, never a delete of a dir that survives', async () => {
+    const { normalizer } = await makeNormalizer();
+    const run = (command: string) => main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } })));
+    expect(run("find . -name '*.log' -delete")).toMatchObject({ action: 'bash', paths: [''] });
+    expect(run('rm -rf src/*')).toMatchObject({ action: 'bash', paths: ['src'] });
+    expect(run('find src -name "*.orig" -delete')).toMatchObject({ action: 'bash', paths: ['src'] });
+    expect(run('rm -rf .')).toMatchObject({ action: 'bash', paths: [''] });
+    // Literal targets still count; the glob next to them does not.
+    expect(run('rm docs/old.md src/utils/*.ts')).toMatchObject({ action: 'delete', paths: ['docs/old.md'] });
+  });
+
+  it('Bash mv without bashEditDiff: paths are the new locations, fromPaths the old ones, aligned', async () => {
+    const { normalizer } = await makeNormalizer();
+    const run = (command: string, id?: string, event = 'PreToolUse') =>
+      main(normalizer.normalize(ev({ hook_event_name: event, tool_name: 'Bash', ...(id ? { tool_use_id: id } : {}), tool_input: { command } })));
+    expect(run('git mv docs/old.md docs/notes.md')).toMatchObject({ action: 'move', paths: ['docs/notes.md'], fromPaths: ['docs/old.md'] });
+    // Into an existing dir: the source keeps its name there.
+    expect(run('mv docs/old.md src')).toMatchObject({ action: 'move', paths: ['src/old.md'], fromPaths: ['docs/old.md'] });
+    expect(run('mv -t src CLAUDE.md docs/old.md')).toMatchObject({ paths: ['src/CLAUDE.md', 'src/old.md'], fromPaths: ['CLAUDE.md', 'docs/old.md'] });
+    expect(run('cd src && mv utils/legacy.ts api/')).toMatchObject({ paths: ['src/api/legacy.ts'], fromPaths: ['src/utils/legacy.ts'] });
+    // Out of the repo: a delete; into it: a create.
+    expect(run('mv docs/old.md /tmp/elsewhere.md')).toMatchObject({ action: 'delete', paths: ['docs/old.md'], outsideRepo: ['/tmp/elsewhere.md'] });
+    expect(run('mv /tmp/in.md docs/in.md')).toMatchObject({ action: 'create', paths: ['docs/in.md'], outsideRepo: ['/tmp/in.md'] });
+    // The Post reuses the Pre decision (the tree may already show the new dir by then).
+    expect(run('mv src/utils newdir', 'm1')).toMatchObject({ phase: 'pre', paths: ['newdir'], fromPaths: ['src/utils'] });
+    expect(run('mv src/utils newdir', 'm1', 'PostToolUse')).toMatchObject({ phase: 'post', paths: ['newdir'], fromPaths: ['src/utils'] });
   });
 
   it('bashEditDiff with only edits -> one edit per file; excluded paths dropped', async () => {

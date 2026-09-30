@@ -172,6 +172,8 @@ function withoutEditDiff(p: HookPayload): HookPayload {
   return q;
 }
 
+const FILE_CHANGE = new Set(['create', 'delete', 'move', 'edit']);
+
 const key = (e: VizEvent) => `${e.action}|${e.phase}|${e.toolUseId ?? ''}|${e.paths.join(',')}`;
 
 /** Every string in the fixture that is file content or tool output, never allowed in the log. */
@@ -445,6 +447,241 @@ describe('watcher attribution', () => {
     await waitFor(() => client.events().length > 0, 3000, 'external edit');
     expect(client.events()[0]).toMatchObject({ action: 'edit', paths: ['CLAUDE.md'], external: true, source: 'watcher' });
     expect(client.messages.some((m) => m.type === 'tree')).toBe(false);
+  });
+});
+
+describe('one event per real file change (hook vs watcher)', () => {
+  const SID = 'sess-dedupe';
+
+  function bash(repo: string, event: string, id: string, command: string, extra: Record<string, unknown> = {}): HookPayload {
+    return { hook_event_name: event, session_id: SID, cwd: repo, tool_name: 'Bash', tool_use_id: id, tool_input: { command }, ...extra };
+  }
+
+  function withDiff(files: Record<string, unknown>[]): Record<string, unknown> {
+    return { tool_response: { stdout: '', stderr: '', bashEditDiff: { files, moreFiles: 0 } } };
+  }
+
+  /** Non-pre events that light `rel` (what the panel counts). */
+  const counted = (client: Client, rel: string) =>
+    client.events().filter((e) => e.phase !== 'pre' && (e.paths.includes(rel) || (e.fromPaths ?? []).includes(rel)));
+
+  function makePlainRepo(files: Record<string, string>): string {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-plain-'));
+    tmpDirs.push(repo);
+    for (const [rel, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+      fs.writeFileSync(path.join(repo, rel), content);
+    }
+    return repo;
+  }
+
+  /** A rename keeps the birth time; the watcher uses it to tell a rename from a new file. */
+  function age(repo: string, ...rels: string[]): void {
+    const old = new Date(Date.now() - 60_000);
+    for (const rel of rels) fs.utimesSync(path.join(repo, rel), old, old);
+  }
+
+  // Regression (F1 case 1): `echo hi > new.txt && sleep 3` with bashEditDiff lit new.txt twice,
+  // because the watcher record expired 2 s before the Post arrived.
+  it('bashEditDiff create arriving long after the watcher saw it: one create', async () => {
+    let skew = 0;
+    const { repo, server } = await start({ now: () => Date.now() + skew });
+    const client = await connect(server.url);
+    const abs = path.join(fs.realpathSync(repo), 'new.txt');
+    await post(server.url, bash(repo, 'PreToolUse', 'b1', 'echo hi > new.txt && sleep 3'));
+    fs.writeFileSync(abs, 'hi\n');
+    await waitFor(() => counted(client, 'new.txt').length > 0, 3000, 'watcher create');
+    skew = 3000; // the command keeps running
+    await post(server.url, bash(repo, 'PostToolUse', 'b1', 'echo hi > new.txt && sleep 3', withDiff([{ filePath: abs, created: true, hunks: [] }])));
+    await sleep(300);
+    expect(counted(client, 'new.txt')).toHaveLength(1);
+    expect(counted(client, 'new.txt')[0]).toMatchObject({ source: 'watcher', action: 'create', toolUseId: 'b1', sessionId: SID });
+  });
+
+  // Regression (F1 case 2): git mv with the watcher first gave delete + create + move.
+  it('git mv with the watcher first: one move', async () => {
+    const { repo, server } = await start();
+    const client = await connect(server.url);
+    age(repo, 'docs/old.md');
+    const real = fs.realpathSync(repo);
+    const cmd = 'git mv docs/old.md docs/notes.md && npm test';
+    await post(server.url, bash(repo, 'PreToolUse', 'm1', cmd));
+    fs.renameSync(path.join(repo, 'docs/old.md'), path.join(repo, 'docs/notes.md'));
+    await waitFor(() => client.events().some((e) => e.source === 'watcher'), 3000, 'watcher move');
+    await post(
+      server.url,
+      bash(repo, 'PostToolUse', 'm1', cmd, withDiff([
+        { filePath: path.join(real, 'docs/notes.md'), created: true, hunks: [] },
+        { filePath: path.join(real, 'docs/old.md'), deleted: true, hunks: [] },
+      ])),
+    );
+    await sleep(300);
+    const lit = client.events().filter((e) => e.phase !== 'pre' && FILE_CHANGE.has(e.action));
+    expect(lit.map((e) => `${e.source}:${e.action}:${e.paths.join()}<${(e.fromPaths ?? []).join()}`)).toEqual(['watcher:move:docs/notes.md<docs/old.md']);
+    const tree = (await (await fetch(server.url + '/tree')).json()) as TreeSnapshot;
+    expect(tree.entries.map((e) => e.path)).toContain('docs/notes.md');
+    expect(tree.entries.map((e) => e.path)).not.toContain('docs/old.md');
+  });
+
+  // Regression (F1 case 3): rm -r dir with the watcher first gave delete dir + one delete per file.
+  it('rm -r dir with the watcher first: one delete for the dir', async () => {
+    const { repo, server } = await start();
+    const client = await connect(server.url);
+    const real = fs.realpathSync(repo);
+    await post(server.url, bash(repo, 'PreToolUse', 'r1', 'rm -r src/utils'));
+    fs.rmSync(path.join(repo, 'src/utils'), { recursive: true });
+    await waitFor(() => client.events().some((e) => e.source === 'watcher'), 3000, 'watcher delete');
+    await post(
+      server.url,
+      bash(repo, 'PostToolUse', 'r1', 'rm -r src/utils', withDiff([
+        { filePath: path.join(real, 'src/utils/format.ts'), deleted: true, hunks: [] },
+        { filePath: path.join(real, 'src/utils/legacy.ts'), deleted: true, hunks: [] },
+      ])),
+    );
+    await sleep(300);
+    const lit = client.events().filter((e) => e.phase !== 'pre' && FILE_CHANGE.has(e.action));
+    expect(lit.map((e) => `${e.source}:${e.action}:${e.paths.join()}`)).toEqual(['watcher:delete:src/utils']);
+  });
+
+  // Regression (F2): without bashEditDiff, rm gave a hook post delete and a watcher delete.
+  it('rm without bashEditDiff, watcher first: the hook guess is not counted again', async () => {
+    const { repo, server } = await start();
+    const client = await connect(server.url);
+    await post(server.url, bash(repo, 'PreToolUse', 'g1', 'rm src/utils/legacy.ts'));
+    fs.rmSync(path.join(repo, 'src/utils/legacy.ts'));
+    await waitFor(() => counted(client, 'src/utils/legacy.ts').length > 0, 3000, 'watcher delete');
+    await post(server.url, bash(repo, 'PostToolUse', 'g1', 'rm src/utils/legacy.ts', { tool_response: { stdout: '' } }));
+    await sleep(300);
+    expect(counted(client, 'src/utils/legacy.ts')).toHaveLength(1);
+    expect(counted(client, 'src/utils/legacy.ts')[0]).toMatchObject({ source: 'watcher', action: 'delete', toolUseId: 'g1' });
+  });
+
+  it('rm without bashEditDiff, hook first: one delete, and the tree still loses the file', async () => {
+    const { repo, server } = await start();
+    const client = await connect(server.url);
+    await post(server.url, bash(repo, 'PreToolUse', 'g2', 'rm src/utils/legacy.ts'));
+    fs.rmSync(path.join(repo, 'src/utils/legacy.ts'));
+    await post(server.url, bash(repo, 'PostToolUse', 'g2', 'rm src/utils/legacy.ts', { tool_response: { stdout: '' } }));
+    await sleep(600);
+    expect(counted(client, 'src/utils/legacy.ts')).toHaveLength(1);
+    const removed = client.messages.flatMap((m) => (m.type === 'tree' ? m.removed : []));
+    expect(removed).toEqual(['src/utils/legacy.ts']);
+  });
+
+  it('mv without bashEditDiff: one move whatever the order', async () => {
+    const { repo, server } = await start();
+    const client = await connect(server.url);
+    age(repo, 'src/api/order.ts');
+    await post(server.url, bash(repo, 'PreToolUse', 'v1', 'mv src/api/order.ts src/api/orders.ts'));
+    fs.renameSync(path.join(repo, 'src/api/order.ts'), path.join(repo, 'src/api/orders.ts'));
+    await post(server.url, bash(repo, 'PostToolUse', 'v1', 'mv src/api/order.ts src/api/orders.ts', { tool_response: { stdout: '' } }));
+    await sleep(600);
+    const lit = client.events().filter((e) => e.phase !== 'pre' && FILE_CHANGE.has(e.action));
+    expect(lit).toHaveLength(1);
+    expect(lit[0]).toMatchObject({ action: 'move', paths: ['src/api/orders.ts'], fromPaths: ['src/api/order.ts'] });
+  });
+
+  // Regression (F5): an external rename showed as a delete plus creates.
+  it('an external dir rename is one external move', async () => {
+    const { repo, server } = await start();
+    const client = await connect(server.url);
+    age(repo, 'src/api', 'src/api/user.ts', 'src/api/order.ts');
+    fs.renameSync(path.join(repo, 'src/api'), path.join(repo, 'src/routes'));
+    await waitFor(() => client.events().length > 0, 3000, 'external move');
+    await sleep(400);
+    expect(client.events()).toHaveLength(1);
+    expect(client.events()[0]).toMatchObject({ action: 'move', paths: ['src/routes'], fromPaths: ['src/api'], external: true });
+    const tree = (await (await fetch(server.url + '/tree')).json()) as TreeSnapshot;
+    const paths = tree.entries.map((e) => e.path);
+    expect(paths).toEqual(expect.arrayContaining(['src/routes', 'src/routes/user.ts', 'src/routes/order.ts']));
+    expect(paths.some((p) => p.startsWith('src/api'))).toBe(false);
+  });
+
+  // Regression (dedupe by path only): the watcher lit tmp.txt as created, and the Bash guess
+  // `rm tmp.txt` was dropped as "already shown" while it suppressed the watcher's unlink.
+  it('a file created and then removed by one Bash (no bashEditDiff): one create and one delete', async () => {
+    const { repo, server } = await start();
+    const client = await connect(server.url);
+    await post(server.url, bash(repo, 'PreToolUse', 't1', 'echo x > tmp.txt && sleep 1 && rm tmp.txt'));
+    fs.writeFileSync(path.join(repo, 'tmp.txt'), 'x');
+    await waitFor(() => counted(client, 'tmp.txt').length > 0, 3000, 'watcher create');
+    fs.rmSync(path.join(repo, 'tmp.txt'));
+    await post(server.url, bash(repo, 'PostToolUse', 't1', 'echo x > tmp.txt && sleep 1 && rm tmp.txt', { tool_response: { stdout: '' } }));
+    await sleep(600);
+    expect(counted(client, 'tmp.txt').map((e) => e.action)).toEqual(['create', 'delete']);
+    const tree = (await (await fetch(server.url + '/tree')).json()) as TreeSnapshot;
+    expect(tree.entries.map((e) => e.path)).not.toContain('tmp.txt');
+  });
+
+  it('a file edited and then deleted by one Bash with bashEditDiff: the delete is still shown', async () => {
+    const { repo, server } = await start();
+    const client = await connect(server.url);
+    const real = fs.realpathSync(repo);
+    const cmd = "sed -i '' s/a/b/ src/utils/legacy.ts && sleep 1 && rm src/utils/legacy.ts";
+    await post(server.url, bash(repo, 'PreToolUse', 'e1', cmd));
+    fs.writeFileSync(path.join(repo, 'src/utils/legacy.ts'), 'changed\n');
+    await waitFor(() => counted(client, 'src/utils/legacy.ts').length > 0, 3000, 'watcher edit');
+    fs.rmSync(path.join(repo, 'src/utils/legacy.ts'));
+    await post(server.url, bash(repo, 'PostToolUse', 'e1', cmd, withDiff([{ filePath: path.join(real, 'src/utils/legacy.ts'), deleted: true, hunks: [] }])));
+    await sleep(600);
+    expect(counted(client, 'src/utils/legacy.ts').map((e) => e.action)).toEqual(['edit', 'delete']);
+  });
+
+  it('a file created late in a dir the same Bash created: its create is still shown', async () => {
+    const { repo, server } = await start();
+    const client = await connect(server.url);
+    const real = fs.realpathSync(repo);
+    const cmd = 'mkdir out && echo > out/a && sleep 1 && echo > out/b';
+    await post(server.url, bash(repo, 'PreToolUse', 'n1', cmd));
+    fs.mkdirSync(path.join(repo, 'out'));
+    fs.writeFileSync(path.join(repo, 'out/a'), 'a');
+    await waitFor(() => counted(client, 'out/a').length > 0, 3000, 'watcher create');
+    fs.writeFileSync(path.join(repo, 'out/b'), 'b');
+    await post(
+      server.url,
+      bash(repo, 'PostToolUse', 'n1', cmd, withDiff([
+        { filePath: path.join(real, 'out/a'), created: true, hunks: [] },
+        { filePath: path.join(real, 'out/b'), created: true, hunks: [] },
+      ])),
+    );
+    await sleep(600);
+    expect(counted(client, 'out/a')).toHaveLength(1);
+    expect(counted(client, 'out/b')).toHaveLength(1);
+  });
+
+  // Regression (F4): outside git, a hook create under build/ entered the tree and never left it.
+  it('outside git, a hook create under a default exclude does not enter the tree', async () => {
+    const repo = makePlainRepo({ 'a.txt': 'a' });
+    const { server } = await start({ root: repo });
+    const real = fs.realpathSync(repo);
+    const input = { file_path: path.join(real, 'build/out.js'), content: 'x' };
+    const write = { session_id: SID, cwd: repo, tool_name: 'Write', tool_use_id: 'w1', tool_input: input };
+    await post(server.url, { ...write, hook_event_name: 'PreToolUse' });
+    fs.mkdirSync(path.join(repo, 'build'));
+    fs.writeFileSync(path.join(repo, 'build/out.js'), 'x');
+    await post(server.url, { ...write, hook_event_name: 'PostToolUse', tool_response: { type: 'create' } });
+    await sleep(200);
+    fs.rmSync(path.join(repo, 'build'), { recursive: true });
+    await sleep(400);
+    const tree = (await (await fetch(server.url + '/tree')).json()) as TreeSnapshot;
+    expect(tree.entries.map((e) => e.path)).toEqual(['a.txt']);
+  });
+
+  // Regression (F8): `repo-synapse start` installing its hooks showed up as an external create.
+  it('its own settings.local.json write right after startup is not an event (the tree still shows it)', async () => {
+    const repo = makePlainRepo({ 'a.txt': 'a' });
+    const { server } = await start({ root: repo });
+    const client = await connect(server.url);
+    // Same shape as src/install/settings.ts: temp file in the same dir, then rename.
+    fs.mkdirSync(path.join(repo, '.claude'));
+    const tmp = path.join(repo, '.claude', `.settings.local.json.${process.pid}.a1b2c3d4.tmp`);
+    fs.writeFileSync(tmp, '{"hooks":{}}\n');
+    fs.renameSync(tmp, path.join(repo, '.claude/settings.local.json'));
+    await waitFor(() => client.messages.some((m) => m.type === 'tree'), 3000, 'tree delta');
+    await sleep(400);
+    expect(client.events()).toEqual([]);
+    const tree = (await (await fetch(server.url + '/tree')).json()) as TreeSnapshot;
+    expect(tree.entries.map((e) => e.path)).toEqual(['.claude', '.claude/settings.local.json', 'a.txt']);
   });
 });
 

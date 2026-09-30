@@ -27,7 +27,7 @@ import { Attributor, type Attribution, type DiskChange, type Owner } from './att
 import { EventLog, readLog } from './eventlog.ts';
 import { Normalizer, parseHookPayload, type HookPayload } from './normalize.ts';
 import { createPathResolver } from './paths.ts';
-import { isGitIgnored, scanTree, TreeIndex } from './tree.ts';
+import { isExcludedRel, isGitIgnored, scanTree, TreeIndex } from './tree.ts';
 import { startWatcher, type WatcherHandle } from './watcher.ts';
 
 export interface SynapseServerOptions {
@@ -91,6 +91,13 @@ const MIME: Record<string, string> = {
 };
 
 const FILE_CHANGE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+/** The hooks file `repo-synapse start` writes right after the server is up. */
+const OWN_SETTINGS = '.claude/settings.local.json';
+/** Its atomic-write temp file (src/install/settings.ts). */
+const OWN_SETTINGS_TEMP = /^\.claude\/\.settings\.local\.json\.\d+\.[0-9a-f]+\.tmp$/;
+/** How long after startup a change to OWN_SETTINGS is taken as our own install. */
+const OWN_WRITE_MS = 10_000;
 
 // ---------------------------------------------------------------- helpers
 
@@ -156,6 +163,17 @@ function isExactFileChange(p: HookPayload, ev: VizEvent): boolean {
   if (ev.action !== 'create' && ev.action !== 'delete' && ev.action !== 'move' && ev.action !== 'edit') return false;
   if (ev.toolName === 'Bash') return hasBashEditDiff(p);
   return ev.toolName !== undefined && FILE_CHANGE_TOOLS.has(ev.toolName);
+}
+
+/**
+ * A finished Bash rm/mv without bashEditDiff: its paths are read from the command line.
+ * The watcher sees the same change, so only one of the two may light it. A denied
+ * command never ran and changed nothing.
+ */
+function isBashGuess(p: HookPayload, ev: VizEvent): boolean {
+  if (ev.source !== 'hook' || ev.toolName !== 'Bash' || p.hook_event_name === 'PermissionDenied') return false;
+  if (ev.phase !== 'post' && ev.phase !== 'fail') return false;
+  return (ev.action === 'delete' || ev.action === 'move' || ev.action === 'create') && !hasBashEditDiff(p);
 }
 
 /** Sessions rebuilt from logged events (replay mode). */
@@ -299,6 +317,69 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
 
   // --- hooks
 
+  /** Outside git, the scan and the watcher skip DEFAULT_EXCLUDES (build/, dist/...): hooks must not add them either. */
+  const isGit = live && fs.existsSync(path.join(index.root, '.git'));
+  const indexable = (rel: string): boolean => isGit || !isExcludedRel(rel);
+
+  /**
+   * Drops from a Bash hook event the paths the watcher already lit during that command
+   * (or beneath a dir it lit). A move whose two ends were both lit goes away; when only
+   * one end was, the other one is left as a create or a delete.
+   */
+  function withoutEmitted(ev: VizEvent): VizEvent[] {
+    // A create or an edit is shown by the watcher lighting the path as present, a delete by
+    // lighting it as gone; the other state does not count (created, then removed).
+    const seen = (rel: string, present = ev.action !== 'delete'): boolean =>
+      attributor?.wasEmitted(rel, ev.toolUseId, present) ?? false;
+    const from = ev.fromPaths ?? [];
+    const keepTo: string[] = [];
+    const keepFrom: string[] = [];
+    const created: string[] = [];
+    const deleted: string[] = [];
+    if (ev.action === 'move' && from.length === ev.paths.length) {
+      ev.paths.forEach((to, i) => {
+        const fr = from[i] as string;
+        const seenTo = seen(to, true);
+        const seenFrom = seen(fr, false);
+        if (!seenTo && !seenFrom) {
+          keepTo.push(to);
+          keepFrom.push(fr);
+        } else if (seenFrom && !seenTo) {
+          created.push(to);
+        } else if (seenTo && !seenFrom) {
+          deleted.push(fr);
+        }
+      });
+    } else {
+      keepTo.push(...ev.paths.filter((r) => !seen(r)));
+      keepFrom.push(...from.filter((r) => !seen(r, false)));
+    }
+    if (keepTo.length === ev.paths.length && keepFrom.length === from.length) return [ev];
+
+    const out: VizEvent[] = [];
+    if (keepTo.length > 0 || keepFrom.length > 0) {
+      const kept: VizEvent = { ...ev, paths: keepTo };
+      if (keepFrom.length > 0) kept.fromPaths = keepFrom;
+      else delete kept.fromPaths;
+      out.push(kept);
+    }
+    const part = (action: 'create' | 'delete', paths: string[]): VizEvent => {
+      const e: VizEvent = { ...ev, id: randomUUID(), action, paths };
+      delete e.fromPaths;
+      delete e.outsideRepo;
+      return e;
+    };
+    if (created.length > 0) out.push(part('create', created));
+    if (deleted.length > 0) out.push(part('delete', deleted));
+    if (out.length === 0 && ev.phase === 'fail') {
+      // Everything it touched is already shown; the failure itself still is news.
+      const failed: VizEvent = { ...ev, action: 'bash', paths: [] };
+      delete failed.fromPaths;
+      out.push(failed);
+    }
+    return out;
+  }
+
   function processHook(raw: string): void {
     if (!live || !normalizer || !attributor) return;
     const p = parseHookPayload(raw);
@@ -306,7 +387,8 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
     attributor.onHook(p);
     const events = normalizer.normalize(p);
     for (const ev of events) {
-      if (!isExactFileChange(p, ev)) {
+      const exact = isExactFileChange(p, ev);
+      if (!exact && !isBashGuess(p, ev)) {
         emitEvent(ev);
         continue;
       }
@@ -314,25 +396,26 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
       if (ev.agentId) owner.agentId = ev.agentId;
       if (ev.toolUseId) owner.toolUseId = ev.toolUseId;
       if (ev.promptId) owner.promptId = ev.promptId;
-      attributor.noteReported([...ev.paths, ...(ev.fromPaths ?? [])], owner);
 
+      // A guess never touches the tree: the watcher applies what really happened.
       const added: TreeEntry[] = [];
       const removed: string[] = [];
-      if (ev.action === 'create' || ev.action === 'move') {
-        for (const rel of ev.paths) added.push(...index.add(rel, 'file'));
+      if (exact) {
+        if (ev.action === 'create' || ev.action === 'move') {
+          for (const rel of ev.paths) if (indexable(rel)) added.push(...index.add(rel, 'file'));
+        }
+        if (ev.action === 'delete') for (const rel of ev.paths) removed.push(...index.remove(rel));
+        if (ev.action === 'move') for (const rel of ev.fromPaths ?? []) removed.push(...index.remove(rel));
       }
-      if (ev.action === 'delete') for (const rel of ev.paths) removed.push(...index.remove(rel));
-      if (ev.action === 'move') for (const rel of ev.fromPaths ?? []) removed.push(...index.remove(rel));
 
       // The watcher may have beaten a Bash post to it: do not light the same change twice.
-      let out: VizEvent | undefined = ev;
-      if (ev.toolName === 'Bash' && ev.action !== 'move') {
-        const paths = ev.paths.filter((rel) => !attributor?.wasEmitted(rel, ev.action));
-        out = paths.length === 0 && ev.paths.length > 0 ? undefined : { ...ev, paths };
-      }
+      const out = ev.toolName === 'Bash' ? withoutEmitted(ev) : [ev];
+      // And from now on, the watcher only updates the tree for these paths.
+      const subtree = ev.action === 'delete' || ev.action === 'move';
+      attributor.noteReported([...ev.paths, ...(ev.fromPaths ?? [])], owner, { subtree });
 
       emitDelta(added, []);
-      if (out) emitEvent(out);
+      for (const e of out) emitEvent(e);
       emitDelta([], removed);
     }
     maybeBroadcastSessions();
@@ -341,7 +424,14 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
   // --- watcher
 
   function watcherEvent(c: DiskChange, a: Attribution): VizEvent {
-    const action = c.type === 'add' || c.type === 'addDir' ? 'create' : c.type === 'change' ? 'edit' : 'delete';
+    const action =
+      c.type === 'add' || c.type === 'addDir'
+        ? 'create'
+        : c.type === 'change'
+          ? 'edit'
+          : c.type === 'move' || c.type === 'moveDir'
+            ? 'move'
+            : 'delete';
     const ev: VizEvent = {
       id: randomUUID(),
       ts: now(),
@@ -351,6 +441,7 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
       paths: [c.path],
       source: 'watcher',
     };
+    if (c.from !== undefined) ev.fromPaths = [c.from];
     if (a.attributed) {
       if (a.promptId) ev.promptId = a.promptId;
       if (a.agentId) ev.agentId = a.agentId;
@@ -369,12 +460,23 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
       if (c.type === 'add') added.push(...index.add(c.path, 'file'));
       else if (c.type === 'addDir') added.push(...index.add(c.path, 'dir'));
       else if (c.type === 'unlink' || c.type === 'unlinkDir') removed.push(...index.remove(c.path));
+      else if (c.type === 'move' || c.type === 'moveDir') {
+        if (c.from !== undefined) removed.push(...index.remove(c.from));
+        added.push(...index.add(c.path, c.type === 'moveDir' ? 'dir' : 'file'));
+      }
 
-      const a = attributor.classify(c);
+      // The contents of a moved dir, or the temp file of our own settings write: tree only.
+      const silent = c.quiet === true || OWN_SETTINGS_TEMP.test(c.path);
+      const a = silent ? undefined : attributor.classify(c);
       emitDelta(added, []);
-      if (!a.suppressed) {
+      if (a && !a.suppressed) {
         const ev = watcherEvent(c, a);
-        attributor.noteEmitted(c.path, ev.action);
+        // A new dir does not cover files created in it later (they get their own event);
+        // a removed or moved dir does cover its contents.
+        const gone = c.type === 'unlink' || c.type === 'unlinkDir';
+        const subtree = c.type === 'unlinkDir' || c.type === 'moveDir';
+        attributor.noteEmitted(ev.paths, c.ts, { present: !gone, subtree });
+        if (ev.fromPaths) attributor.noteEmitted(ev.fromPaths, c.ts, { present: false, subtree });
         emitEvent(ev);
       }
       emitDelta([], removed);
@@ -385,7 +487,6 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
 
   if (live && o.watch !== false) {
     const root = index.root;
-    const isGit = fs.existsSync(path.join(root, '.git'));
     const watchOpts: Parameters<typeof startWatcher>[0] = {
       root,
       index,
@@ -612,6 +713,9 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
   const address = server.address();
   const actualPort = typeof address === 'object' && address !== null ? address.port : port;
   allowedOrigins = allowedOriginSet(actualPort, o.allowedOrigins);
+  // `repo-synapse start` installs its hooks into OWN_SETTINGS as soon as this resolves.
+  // That write is the viewer's own doing, never a change to show (the tree still gets it).
+  if (watcher) attributor?.noteReported([OWN_SETTINGS], undefined, { ms: OWN_WRITE_MS });
   const urlHost = host.includes(':') ? `[${host}]` : host;
 
   let closing: Promise<void> | undefined;

@@ -4,6 +4,7 @@
 
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import type { Action, Phase, SessionInfo, VizEvent } from '../shared/types.ts';
 import { classifyBash, extractPathsFromOutput, type BashClassification } from './bash.ts';
 import { toPosix, type PathResolver } from './paths.ts';
@@ -123,9 +124,16 @@ export function bashDetail(command: string): string {
   return shortDetail(dropped ? `${s} ${REDACTED}` : s);
 }
 
+const GLOB_RE = /[*?[\]{}]/;
+
+/** Argument whose value is only known at run time ($VAR, `cmd`). */
+function isDynamic(arg: string): boolean {
+  return arg.includes('$') || arg.includes('`');
+}
+
 /** For a glob argument ("src/*.ts") returns the static directory before the first glob segment. */
 function globBase(arg: string): string {
-  if (!/[*?[\]{}]/.test(arg)) return arg;
+  if (!GLOB_RE.test(arg)) return arg;
   const parts = arg.split('/');
   const idx = parts.findIndex((p) => /[*?[\]{}]/.test(p));
   const base = parts.slice(0, idx).join('/');
@@ -157,6 +165,8 @@ export class Normalizer {
   readonly #writeExisted = new Map<string, boolean>();
   /** tool_use_id -> classification at PreToolUse(Bash). */
   readonly #bashPre = new Map<string, BashClassification>();
+  /** tool_use_id -> delete/move plans computed at PreToolUse(Bash), against the tree before the command. */
+  readonly #bashPlans = new Map<string, ToolPlan[]>();
 
   constructor(opts: NormalizerOptions) {
     this.#resolver = opts.resolver;
@@ -400,10 +410,91 @@ export class Normalizer {
       return [plan];
     }
     if (cls.kind === 'delete' || cls.kind === 'move') {
-      const args = cls.pathArgs.filter((a) => !a.includes('$') && !a.includes('`')).map(globBase);
-      return [{ action: cls.kind, ...this.#place(args, cwd), detail }];
+      let plans = phase !== 'pre' && toolUseId ? this.#bashPlans.get(toolUseId) : undefined;
+      if (!plans) plans = cls.kind === 'delete' ? this.#deletePlans(cls, cwd) : this.#movePlans(cls, cwd);
+      if (phase === 'pre' && toolUseId) this.#remember(this.#bashPlans, toolUseId, plans);
+      if (finished && toolUseId) this.#bashPlans.delete(toolUseId);
+      if (plans.length > 0) {
+        return plans.map((pl) => {
+          const copy: ToolPlan = { ...pl, paths: [...pl.paths], outside: [...pl.outside], detail };
+          if (pl.fromPaths) copy.fromPaths = [...pl.fromPaths];
+          return copy;
+        });
+      }
+      // Nothing certain to point at (globs, find -delete, rm -rf .): the watcher reports
+      // the real removals, so the command is shown as plain Bash on the dirs it works in.
+      const hints = cls.pathArgs.filter((a) => !isDynamic(a)).map(globBase);
+      const placed = hints.length > 0 ? this.#place(hints, cwd) : this.#cwdPlace(argBase);
+      if (placed.paths.length === 0 && placed.outside.length === 0) return [{ action: 'bash', ...this.#cwdPlace(argBase), detail }];
+      return [{ action: 'bash', ...placed, detail }];
     }
     return [{ action: 'bash', ...this.#cwdPlace(argBase), detail }];
+  }
+
+  /**
+   * Heuristic delete targets: literal arguments only. Globs and `find` roots are not
+   * what gets deleted, and the repo root is never deleted itself. [] = nothing certain.
+   */
+  #deletePlans(cls: BashClassification, cwd: string | undefined): ToolPlan[] {
+    const bases = new Set(cls.bases ?? []);
+    const targets = cls.pathArgs.filter((a) => !isDynamic(a) && !GLOB_RE.test(a) && !bases.has(a));
+    const placed = this.#place(targets, cwd);
+    placed.paths = placed.paths.filter((p) => p !== '');
+    if (placed.paths.length === 0 && placed.outside.length === 0) return [];
+    return [{ action: 'delete', ...placed }];
+  }
+
+  /**
+   * Heuristic moves: `paths` are the new locations and `fromPaths` the old ones,
+   * index-aligned. A destination that is a directory (before the command runs)
+   * receives the source under its own name. A move into the repo from outside is a
+   * create, and a move out of it a delete.
+   */
+  #movePlans(cls: BashClassification, cwd: string | undefined): ToolPlan[] {
+    const to: string[] = [];
+    const from: string[] = [];
+    const created: string[] = [];
+    const deleted: string[] = [];
+    const outside: string[] = [];
+    const createdFrom: string[] = [];
+    const deletedTo: string[] = [];
+    const inRepo = (r: { inside: boolean; rel?: string | undefined }): string | undefined =>
+      r.inside && r.rel !== undefined && r.rel !== '' && !isAlwaysExcluded(r.rel) ? r.rel : undefined;
+    const addOutside = (list: string[], r: { inside: boolean; abs: string }) => {
+      const abs = toPosix(r.abs);
+      if (!r.inside && !list.includes(abs)) list.push(abs);
+    };
+    for (const m of cls.moves ?? []) {
+      if (isDynamic(m.dest) || GLOB_RE.test(m.dest)) continue;
+      const dest = this.#resolver.resolve(m.dest, cwd);
+      const into = m.intoDir || (dest.inside && dest.rel !== undefined && this.#index.kind(dest.rel) === 'dir');
+      for (const s of m.sources) {
+        if (isDynamic(s) || GLOB_RE.test(s)) continue;
+        const src = this.#resolver.resolve(s, cwd);
+        const target = into ? this.#resolver.resolve(path.join(dest.abs, path.basename(src.abs))) : dest;
+        const fromRel = inRepo(src);
+        const toRel = inRepo(target);
+        if (fromRel !== undefined && toRel !== undefined) {
+          if (fromRel === toRel) continue;
+          to.push(toRel);
+          from.push(fromRel);
+        } else if (toRel !== undefined) {
+          if (!created.includes(toRel)) created.push(toRel);
+          addOutside(createdFrom, src);
+        } else if (fromRel !== undefined) {
+          if (!deleted.includes(fromRel)) deleted.push(fromRel);
+          addOutside(deletedTo, target);
+        } else {
+          addOutside(outside, src);
+          addOutside(outside, target);
+        }
+      }
+    }
+    const plans: ToolPlan[] = [];
+    if (to.length > 0 || outside.length > 0) plans.push({ action: 'move', paths: to, fromPaths: from, outside });
+    if (created.length > 0) plans.push({ action: 'create', paths: created, outside: createdFrom });
+    if (deleted.length > 0) plans.push({ action: 'delete', paths: deleted, outside: deletedTo });
+    return plans;
   }
 
   #fromEditDiff(files: Record<string, unknown>[], cwd: string | undefined, detail: string | undefined): ToolPlan[] {

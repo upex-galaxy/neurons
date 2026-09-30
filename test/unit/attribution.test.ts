@@ -227,12 +227,120 @@ describe('noteReported (dedupe)', () => {
 });
 
 describe('noteEmitted / wasEmitted', () => {
-  it('remembers watcher emissions per action for dedupeMs', () => {
-    attr.noteEmitted('a.ts', 'delete');
-    expect(attr.wasEmitted('a.ts', 'delete')).toBe(true);
-    expect(attr.wasEmitted('a.ts', 'create')).toBe(false);
-    expect(attr.wasEmitted('b.ts', 'delete')).toBe(false);
+  it('without a window, remembers watcher emissions for dedupeMs', () => {
+    attr.noteEmitted(['a.ts'], t);
+    expect(attr.wasEmitted('a.ts')).toBe(true);
+    expect(attr.wasEmitted('b.ts')).toBe(false);
     t += 2001;
-    expect(attr.wasEmitted('a.ts', 'delete')).toBe(false);
+    expect(attr.wasEmitted('a.ts')).toBe(false);
+  });
+
+  // Regression (F1): `echo hi > new.txt && sleep 3` lit new.txt twice, because the record
+  // expired after 2 s while the Bash command was still running.
+  it('keeps an emission on record for the whole Bash window it fell in', () => {
+    attr.onHook(bashPre('b1'));
+    t += 100;
+    attr.noteEmitted(['new.txt'], t);
+    t += 2600;
+    attr.onHook(hook('PostToolUse', { tool_name: 'Bash', tool_use_id: 'b1' }));
+    expect(attr.wasEmitted('new.txt', 'b1')).toBe(true);
+    expect(attr.wasEmitted('new.txt')).toBe(false); // no window given: dedupeMs only
+  });
+
+  it('does not count an emission made before the window opened', () => {
+    attr.noteEmitted(['a.ts'], t);
+    t += 10;
+    attr.onHook(bashPre('b1'));
+    expect(attr.wasEmitted('a.ts', 'b1')).toBe(false);
+  });
+
+  it('covers paths beneath a dir emitted as a subtree (rm -r dir, then per-file deletes)', () => {
+    attr.onHook(bashPre('b1'));
+    attr.noteEmitted(['dir'], t, { present: false, subtree: true });
+    attr.noteEmitted(['file'], t, { present: false });
+    expect(attr.wasEmitted('dir/a.txt', 'b1', false)).toBe(true);
+    expect(attr.wasEmitted('dir/sub/b.txt', 'b1', false)).toBe(true);
+    expect(attr.wasEmitted('dir/a.txt', 'b1', true)).toBe(false);
+    expect(attr.wasEmitted('file/x', 'b1', false)).toBe(false);
+    expect(attr.wasEmitted('dirt/a.txt', 'b1', false)).toBe(false);
+  });
+
+  // Regression: a file the watcher lit as created (or edited) and that the same command
+  // then deleted counted as "already shown", so the delete was never shown.
+  it('only counts an emission that showed the same state (present or gone)', () => {
+    attr.onHook(bashPre('b1'));
+    attr.noteEmitted(['tmp.txt'], t);
+    expect(attr.wasEmitted('tmp.txt', 'b1', true)).toBe(true);
+    expect(attr.wasEmitted('tmp.txt', 'b1', false)).toBe(false);
+    t += 10;
+    attr.noteEmitted(['tmp.txt'], t, { present: false });
+    expect(attr.wasEmitted('tmp.txt', 'b1', false)).toBe(true);
+    expect(attr.wasEmitted('tmp.txt', 'b1', true)).toBe(false);
+  });
+
+  // Regression: a new dir covered files created in it later, so their creates were lost.
+  it('a dir emitted as present without subtree does not cover later files inside it', () => {
+    attr.onHook(bashPre('b1'));
+    attr.noteEmitted(['out'], t);
+    attr.noteEmitted(['out/a'], t);
+    expect(attr.wasEmitted('out/a', 'b1')).toBe(true);
+    expect(attr.wasEmitted('out/b', 'b1')).toBe(false);
+  });
+
+  it('the latest record wins between a file and a subtree record above it', () => {
+    attr.onHook(bashPre('b1'));
+    attr.noteEmitted(['d/a.txt'], t);
+    t += 10;
+    attr.noteEmitted(['d'], t, { present: false, subtree: true });
+    expect(attr.wasEmitted('d/a.txt', 'b1', false)).toBe(true);
+    expect(attr.wasEmitted('d/a.txt', 'b1', true)).toBe(false);
+  });
+});
+
+describe('windows by the time the change was seen (DiskChange.ts)', () => {
+  // Regression (F6): classify used the processing time, not c.ts.
+  it('an external change seen just before a PreToolUse(Bash) stays external when flushed late', () => {
+    const seenAt = t;
+    t += 30;
+    attr.onHook(bashPre('b1'));
+    t += 10;
+    expect(attr.classify({ type: 'change', path: 'a.ts', ts: seenAt })).toEqual({ attributed: false, suppressed: false });
+    expect(attr.classify({ type: 'change', path: 'a.ts', ts: t })).toMatchObject({ attributed: true, toolUseId: 'b1' });
+  });
+
+  it('a change seen inside a window is attributed to it even when classified after the grace', () => {
+    attr.onHook(bashPre('b1'));
+    t += 400;
+    const seenAt = t;
+    t += 100;
+    attr.onHook(hook('PostToolUse', { tool_name: 'Bash', tool_use_id: 'b1' }));
+    t += 700; // past Post + 600 ms
+    expect(attr.openWindows()).toBe(0);
+    expect(attr.classify({ type: 'add', path: 'out.txt', ts: seenAt })).toMatchObject({ attributed: true, toolUseId: 'b1' });
+    expect(attr.classify({ type: 'add', path: 'out.txt', ts: t })).toEqual({ attributed: false, suppressed: false });
+  });
+});
+
+describe('noteReported subtree and moves', () => {
+  it('a subtree report covers changes beneath it (heuristic rm -r dir)', () => {
+    attr.noteReported(['dir'], { sessionId: 'S1', toolUseId: 'b1' }, { subtree: true });
+    expect(attr.classify(change('dir/a.txt')).suppressed).toBe(true);
+    expect(attr.classify(change('dir', 'unlinkDir')).suppressed).toBe(true);
+    expect(attr.classify(change('dirt/a.txt')).suppressed).toBe(false);
+  });
+
+  it('a watcher move is covered when either end was reported', () => {
+    attr.noteReported(['x.txt'], { sessionId: 'S1', toolUseId: 'b1' });
+    expect(attr.classify({ type: 'move', path: 'y.txt', from: 'x.txt', ts: t }).suppressed).toBe(true);
+    expect(attr.classify({ type: 'move', path: 'z.txt', from: 'w.txt', ts: t }).suppressed).toBe(false);
+  });
+
+  it('honours a custom suppression time', () => {
+    attr.noteReported(['.claude/settings.local.json'], undefined, { ms: 10_000 });
+    t += 9000;
+    expect(attr.classify(change('.claude', 'addDir')).suppressed).toBe(true);
+    expect(attr.classify(change('.claude/settings.local.json', 'add')).suppressed).toBe(true);
+    t += 1001;
+    expect(attr.classify(change('.claude/settings.local.json', 'change')).suppressed).toBe(false);
   });
 });
