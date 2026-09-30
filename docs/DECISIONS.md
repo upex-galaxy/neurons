@@ -1,0 +1,32 @@
+# Decisiones
+
+Registro de decisiones con su motivo. Las marcadas "ronda" salen de la ronda de preguntas (respuesta: "todo default"). Las demás las tomé durante la implementación eligiendo lo más simple que cumple los criterios.
+
+## Ronda de preguntas (2026-09-30)
+
+| # | Tema | Decisión | Motivo |
+|---|---|---|---|
+| D1 | Transporte de hooks | Hooks `type: "http"`, escritos por `repo-synapse start` en `<repo>/.claude/settings.local.json` y quitados al salir | Con el servidor apagado, un hook HTTP permanente imprime `hook error` en rojo en cada tool call (verificado en el binario 2.1.285). Instalar solo mientras corre el visor cumple el criterio 8.2 sin perder la latencia de HTTP |
+| D2 | Runtime | Node >= 22.12 + TypeScript, `node:http` + `ws`, sin framework | Una ruta POST, estáticos y un upgrade WS no justifican framework. `tsx` en desarrollo, `tsdown` para el bin (tsup está sin mantenimiento) |
+| D3 | Vista | 3D con `3d-force-graph` + bloom, Vite + TS, toggle 2D con `force-graph` | Vite garantiza una sola copia de three.js para el grafo y `UnrealBloomPass` |
+| D4 | Alcance | Un repo por proceso, varias sesiones y subagentes con filtros | Simplicidad; dos repos = dos procesos |
+| D5 | Puerto | `7777`, y si está ocupado el siguiente libre | Posible porque `start` escribe el puerto real en los hooks |
+| D6 | Cambios externos | Se muestran en gris tenue, con toggle | Distinguir Claude de lo externo es parte del objetivo didáctico |
+| D7 | `bashEditDiffEnabled` | Probarlo en la fase 0; si llega en el payload HTTP, `start` lo activa en la config de usuario y lo revierte al salir | Da atribución exacta de `rm`/`mv` |
+| D8 | Fase 0 | Sesiones reales `claude -p` con presupuesto limitado | Payloads reales de la versión instalada, no supuestos |
+| D9 | Distribución | Paquete npm listo, no publicado; uso vía `npm link` | Publicar es decisión del usuario |
+| D10 | Nombre e idioma | `repo-synapse`; UI y README en español; código y commits en inglés | Ronda |
+| D11 | Escala | Calibrado para 5.000 archivos; colapso por encima de 1.500 nodos visibles | Tamaño del repo real no informado |
+| D12 | Sonido | No se implementa | Ronda |
+| D13 | Git | Commits en `main`, sin push | Ronda |
+
+## Implementación
+
+| # | Decisión | Motivo |
+|---|---|---|
+| I1 | Watcher con `fs.watch(root, {recursive: true})` nativo, no chokidar | chokidar 5 abre un fd por archivo en macOS y falla con `EMFILE` en repos grandes; `fs.watch` recursivo usa FSEvents |
+| I2 | Identidad de los hooks propios por URL exacta con `?src=repo-synapse` | Un prefijo como `http://127.0.0.1` borraría hooks de otras herramientas (bug documentado en agent-flow) |
+| I3 | `POST /hook` responde `204` sin body antes de procesar | Un body de texto genera `hook error`; un JSON podría interpretarse como decisión |
+| I4 | La sesión se crea con el primer evento que trae un `session_id` nuevo | `SessionStart` no admite hooks HTTP |
+| I5 | Búsquedas detectadas clasificando comandos Bash | En el build nativo de macOS no existen las herramientas Glob/Grep |
+| I6 | `.claude/settings.local.json` y `.repo-synapse/` van a `.git/info/exclude` si git no los ignora | No se asume el auto-gitignore; `info/exclude` no toca archivos versionados |
