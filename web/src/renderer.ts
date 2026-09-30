@@ -27,6 +27,8 @@ export interface Renderer {
   emitParticle(link: VizLink, style: ParticleStyle): void;
   pulse(id: string, color: string, opts: PulseOptions): void;
   fadeOut(id: string): void;
+  /** Stops a fade-out (the path came back before its purge) and restores the idle look. */
+  cancelFade(id: string): void;
   /** Briefly lights a link (moves). */
   flashLink(link: VizLink, color: string, durationMs: number): void;
   /** Drops per-node state for purged nodes. */

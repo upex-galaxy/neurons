@@ -89,6 +89,43 @@ describe('TreeModel', () => {
     expect(m.get('src/api/user.ts')).toBeDefined();
   });
 
+  it('reports nodes revived after their fade started in an earlier delta', () => {
+    const m = load();
+    const r1 = m.applyDelta([], ['src/api']);
+    expect(r1.removing.sort()).toEqual(['src/api', 'src/api/user.ts']);
+    // `rm -rf src/api && mkdir -p src/api && touch src/api/user.ts` in a later flush.
+    const r2 = m.applyDelta(
+      [
+        { path: 'src/api', kind: 'dir' },
+        { path: 'src/api/user.ts', kind: 'file' },
+      ],
+      [],
+    );
+    expect(r2.added).toEqual([]);
+    expect(r2.removing).toEqual([]);
+    // The view must cancel both fades, or the nodes end at scale 0 and stay invisible.
+    expect(r2.revived.sort()).toEqual(['src/api', 'src/api/user.ts']);
+    expect(m.purge(r1.removing)).toEqual([]);
+  });
+
+  it('does not report as revived a node removed and re-added in the same delta', () => {
+    const m = load();
+    const r = m.applyDelta([{ path: 'src/api/user.ts', kind: 'file' }], ['src/api']);
+    expect(r.revived).toEqual([]);
+    expect(r.removing).toEqual([]);
+  });
+
+  it('revives fading ancestors of a brand-new path', () => {
+    const m = load();
+    const r1 = m.applyDelta([], ['src/api']);
+    const r2 = m.applyDelta([{ path: 'src/api/new.ts', kind: 'file' }], []);
+    expect(r2.added.map((n) => n.id)).toEqual(['src/api/new.ts']);
+    expect(r2.revived).toEqual(['src/api']);
+    // Only the old child is purged; the dir keeps its new file.
+    expect(m.purge(r1.removing)).toEqual(['src/api/user.ts']);
+    expect(m.get('src/api/new.ts')?.parentId).toBe('src/api');
+  });
+
   it('never removes the root', () => {
     const m = load();
     expect(m.applyDelta([], ['']).removing).toEqual([]);

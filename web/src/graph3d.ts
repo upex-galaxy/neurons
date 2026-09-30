@@ -313,6 +313,14 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
     fadeOut(id) {
       book.fadeOut(id);
     },
+    cancelFade(id) {
+      if (book.isFading(id)) book.delete(id);
+      const mesh = meshes.get(id);
+      if (!mesh || book.has(id)) return;
+      // A finished fade left the mesh hidden; frame() never un-hides it on its own.
+      mesh.visible = true;
+      applyIdle(mesh);
+    },
     flashLink(link, color, durationMs) {
       const s = endpoint(link.source);
       const e = endpoint(link.target);

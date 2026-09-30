@@ -121,6 +121,11 @@ export interface DeltaResult {
   added: VizNode[];
   /** Ids now marked `removing` (removed paths plus their descendants). Call purge() later. */
   removing: string[];
+  /**
+   * Ids that were `removing` from an earlier delta and came back in this one (re-added
+   * paths and their ancestors). Their fade-out already started: the view must cancel it.
+   */
+  revived: string[];
 }
 
 export class TreeModel {
@@ -222,7 +227,7 @@ export class TreeModel {
    * marked `removing` (so the view can fade them) and must be purged with purge().
    */
   applyDelta(added: TreeEntry[], removed: string[]): DeltaResult {
-    const result: DeltaResult = { added: [], removing: [] };
+    const result: DeltaResult = { added: [], removing: [], revived: [] };
     for (const raw of removed) {
       const path = normalizePath(raw);
       if (path === ROOT_ID || isOutsideId(path) || !this.nodes.has(path)) continue;
@@ -234,21 +239,25 @@ export class TreeModel {
         }
       }
     }
+    // A node marked in this batch has not started fading yet: just drop it from `removing`.
+    // One marked by an earlier batch is already fading: report it as revived.
+    const keep = (id: string): void => {
+      const i = result.removing.indexOf(id);
+      if (i !== -1) result.removing.splice(i, 1);
+      else result.revived.push(id);
+    };
     for (const entry of added) {
-      const before = this.nodes.get(normalizePath(entry.path));
-      const wasRemoving = before?.removing === true;
+      const path = normalizePath(entry.path);
+      if (path === ROOT_ID || isOutsideId(path)) continue;
+      const wasRemoving = this.nodes.get(path)?.removing === true;
       result.added.push(...this.addEntry(entry));
-      if (wasRemoving && before) {
-        const i = result.removing.indexOf(before.id);
-        if (i !== -1) result.removing.splice(i, 1);
-        // Ancestors of a re-added path must survive too.
-        for (let p = before.parentId; p !== null; p = this.nodes.get(p)?.parentId ?? null) {
-          const anc = this.nodes.get(p);
-          if (anc?.removing) {
-            anc.removing = false;
-            const j = result.removing.indexOf(p);
-            if (j !== -1) result.removing.splice(j, 1);
-          }
+      if (wasRemoving) keep(path);
+      // Ancestors of a (re-)added path must survive too, also when the path itself is new.
+      for (let p = this.nodes.get(path)?.parentId ?? null; p !== null; p = this.nodes.get(p)?.parentId ?? null) {
+        const anc = this.nodes.get(p);
+        if (anc?.removing) {
+          anc.removing = false;
+          keep(p);
         }
       }
     }

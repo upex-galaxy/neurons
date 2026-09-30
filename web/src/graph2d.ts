@@ -4,6 +4,7 @@ import ForceGraph from 'force-graph';
 import { Color } from 'three';
 import { GlowBook, idleColor, newSample, type GlowSample } from './glow.ts';
 import { DAG_LEVEL_DISTANCE } from './graph3d.ts';
+import { ParticleTrack } from './particles2d.ts';
 import {
   BACKGROUND,
   baseColor,
@@ -42,6 +43,8 @@ function endpoint(end: string | VizNode): VizNode | null {
 export function createGraph2D(container: HTMLElement, opts: RendererOptions): Renderer {
   const book = new GlowBook();
   const flashes: LinkFlash[] = [];
+  /** Own particle list: force-graph photons are wiped by graphData() and share one style per link. */
+  const particles = new ParticleTrack();
   /** Per-frame samples of glowing nodes, filled in onRenderFramePre. */
   const frameSamples = new Map<string, GlowSample>();
   /** Idle color strings, cached per node until heat or flags change. */
@@ -124,23 +127,6 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
     .linkColor(() => LINK_RGBA)
     .linkWidth(0.6)
     .linkDirectionalParticles(0)
-    .linkDirectionalParticleSpeed((l: VizLink) => l.__pSpeed ?? 0.18)
-    .linkDirectionalParticleCanvasObject((x: number, y: number, l: VizLink, ctx: CanvasRenderingContext2D, scale: number) => {
-      // Style is per link (the last emit wins); photons carry no data of their own.
-      const w = (l.__pWidth ?? 2.5) * 0.9;
-      const r = Math.max(0.8, w / Math.sqrt(scale));
-      ctx.fillStyle = l.__pColor ?? '#ffffff';
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
-      if (l.__pHalo) {
-        ctx.strokeStyle = l.__pHalo;
-        ctx.lineWidth = Math.max(0.8, 1.4 / Math.sqrt(scale));
-        ctx.beginPath();
-        ctx.arc(x, y, r + 2, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    })
     .dagMode('radialout')
     .dagLevelDistance(DAG_LEVEL_DISTANCE)
     .dagNodeFilter((n: VizNode) => !n.outside)
@@ -185,6 +171,22 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
         ctx.stroke();
         ctx.restore();
       }
+      // Each particle keeps the color, width and halo it was emitted with.
+      const root = Math.sqrt(scale);
+      particles.step(now, (x, y, p) => {
+        const r = Math.max(0.8, (p.width * 0.9) / root);
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+        if (p.halo) {
+          ctx.strokeStyle = p.halo;
+          ctx.lineWidth = Math.max(0.8, 1.4 / root);
+          ctx.beginPath();
+          ctx.arc(x, y, r + 2, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      });
     })
     .onEngineTick(() => {
       if (!firstLayoutDone) {
@@ -211,8 +213,7 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
       if (initial) {
         book.clear();
         frameSamples.clear();
-        // Photon lists left on links by a previous 2D instance would replay here.
-        for (const l of data.links) delete (l as { __photons?: unknown }).__photons;
+        particles.clear();
         const root = nodesById.get(ROOT_ID);
         if (root) {
           root.fx = 0;
@@ -225,21 +226,23 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
         graph.warmupTicks(0);
       }
       graph.graphData(data);
+      // Particles in flight survive structural updates on links that are still there.
+      particles.retain(new Set(data.links));
       return graph.graphData().links;
     },
     emitParticle(link, style) {
-      link.__pColor = style.color;
-      link.__pWidth = style.width;
-      link.__pSpeed = style.speed;
-      if (style.halo) link.__pHalo = style.halo;
-      else delete link.__pHalo;
-      graph.emitParticle(link);
+      particles.add(link, style, performance.now());
     },
     pulse(id, color, o) {
       book.pulse(id, color, o);
     },
     fadeOut(id) {
       book.fadeOut(id);
+    },
+    cancelFade(id) {
+      if (book.isFading(id)) book.delete(id);
+      // A finished fade leaves a scale-0 sample behind that would keep the node invisible.
+      if (!book.has(id)) frameSamples.delete(id);
     },
     flashLink(link, color, durationMs) {
       flashes.push({ link, color, start: performance.now(), duration: durationMs });
@@ -281,6 +284,7 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
     dispose() {
       disposed = true;
       observer.disconnect();
+      particles.clear();
       graph._destructor();
       container.replaceChildren();
     },

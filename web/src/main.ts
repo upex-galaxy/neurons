@@ -3,7 +3,7 @@
 import './style.css';
 import { ACTION_COLORS, type ServerMessage, type SessionInfo, type TreeEntry, type TreeSnapshot, type VizEvent } from '../../src/shared/types.ts';
 import { agentColor, rememberAgent } from './agents.ts';
-import { eventTargets, playEvent, type EffectsContext } from './effects.ts';
+import { eventTargets, playEvent, waitsForDelta, type EffectsContext } from './effects.ts';
 import { FADE_OUT_MS } from './glow.ts';
 import { createGraph2D } from './graph2d.ts';
 import { DAG_LEVEL_DISTANCE, createGraph3D } from './graph3d.ts';
@@ -100,6 +100,7 @@ const ctx: EffectsContext = {
   onFirstEmit(event) {
     if (!vizState.replay.active) vizState.lastEventLatencyMs = Date.now() - event.ts;
   },
+  generation: () => generation,
 };
 
 // ---------- rendering the model ----------
@@ -189,8 +190,14 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let flushDue = 0;
 /** The camera was re-framed to include the outside hub. */
 let hubFramed = false;
-/** Bumped on every reset so stale purge timers from a previous tree do nothing. */
+/** Bumped on every reset so stale purge and effect timers from a previous tree do nothing. */
 let generation = 0;
+/**
+ * Id -> the fade that marked it `removing`. A purge timer only purges the ids whose mark is
+ * still its own: a path revived and removed again waits for its new fade to finish.
+ */
+const fadeMarks = new Map<string, number>();
+let fadeSeq = 0;
 
 function scheduleFlush(delay: number): void {
   const due = performance.now() + delay;
@@ -216,8 +223,17 @@ function flushGraph(): void {
       created.push(node.id);
     }
     if (result.added.length) changed = true;
+    // Back before its purge (rm then re-create): stop the fade, it counts as created.
+    for (const id of result.revived) {
+      fadeMarks.delete(id);
+      view.cancelFade(id);
+      pushBounded(vizState.created, id);
+      created.push(id);
+    }
     if (result.removing.length) {
+      const seq = ++fadeSeq;
       for (const id of result.removing) {
+        fadeMarks.set(id, seq);
         view.fadeOut(id);
         pushBounded(vizState.removed, id);
       }
@@ -225,11 +241,18 @@ function flushGraph(): void {
       const gen = generation;
       setTimeout(() => {
         if (gen !== generation) return;
-        purgeQueue.push(...ids);
+        for (const id of ids) {
+          if (fadeMarks.get(id) !== seq) continue;
+          fadeMarks.delete(id);
+          purgeQueue.push(id);
+        }
         scheduleFlush(0);
       }, FADE_OUT_MS);
     }
   }
+
+  // Events that waited for this delta: their new targets exist now and may sit in a collapsed dir.
+  for (const e of queuedPlays) if (revealTargets(e, now)) changed = true;
 
   if (purgeQueue.length) {
     const gone = model.purge(purgeQueue);
@@ -282,9 +305,8 @@ let countersDirty = false;
 let sessionsDirty = false;
 let agentsDirty = false;
 
-/** Makes the event's targets visible (auto-expand) and plays it, after a flush if needed. */
-function stage(event: VizEvent): void {
-  const now = Date.now();
+/** Expands the collapsed dirs hiding the event's targets. True when one was expanded. */
+function revealTargets(event: VizEvent, now: number): boolean {
   let changed = false;
   for (const p of eventTargets(event)) {
     for (const id of model.reveal(p, now)) {
@@ -294,7 +316,15 @@ function stage(event: VizEvent): void {
     }
     model.touch(p, now);
   }
-  if (changed || outsideDirty || queuedPlays.length) {
+  return changed;
+}
+
+/** Makes the event's targets visible (auto-expand) and plays it, after a flush if needed. */
+function stage(event: VizEvent): void {
+  const changed = revealTargets(event, Date.now());
+  // A create's tree delta arrives just before it and is still buffered: flush it first so
+  // the light reaches the new file and not its parent dir.
+  if (changed || outsideDirty || queuedPlays.length || waitsForDelta(event, model, pendingAdded)) {
     queuedPlays.push(event);
     structureDirty = true;
     scheduleFlush(REVEAL_DEBOUNCE_MS);
@@ -359,6 +389,7 @@ function resetAll(tree: TreeSnapshot, mode: 'live' | 'replay'): void {
   pendingRemoved = [];
   purgeQueue = [];
   queuedPlays = [];
+  fadeMarks.clear();
   structureDirty = false;
   outsideDirty = false;
   if (flushTimer !== null) clearTimeout(flushTimer);
@@ -494,6 +525,7 @@ const replay = new ReplayController({
     pendingRemoved = [];
     purgeQueue = [];
     queuedPlays = [];
+    fadeMarks.clear();
     model.load(tree);
     model.collapseToBudget(BUDGET);
     if (animate) render(true);
