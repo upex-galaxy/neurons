@@ -5,7 +5,8 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "repo-synapse": "./dist/cli.mjs"
+    "repo-synapse": "./dist/cli.mjs",
+    "neu": "./dist/cli.mjs"
   },
   "files": [
     "dist"
