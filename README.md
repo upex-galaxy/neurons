@@ -80,6 +80,8 @@ El panel lateral tiene el feed en vivo, contadores por acción, filtros por sesi
 
 ## Cómo funciona
 
+La explicación visual completa, con diagramas animados, está en [docs/arquitectura.html](docs/arquitectura.html): abrila en el navegador.
+
 ```
 Claude Code ──hook HTTP (POST)──▶ servidor 127.0.0.1 ──WebSocket──▶ navegador
                                       ▲         │
