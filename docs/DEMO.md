@@ -85,3 +85,30 @@ Tiene play, pausa, reiniciar y velocidades 1x, 2x y 5x. Los silencios de más de
 ## 5. Cerrar
 
 `Ctrl+C` en la terminal de `start`, o `neu stop ~/neurons-demo` desde cualquier otra (`neu ls` muestra qué visores corren). Al cerrar, el visor quita los hooks de `.claude/settings.local.json` (si el archivo no existía, lo borra) y devuelve `bashEditDiffEnabled` a su valor anterior en `~/.claude/settings.json`. Con el visor cerrado, Claude Code no ve ningún hook de Neurons y no muestra errores.
+
+## 6. Demo larga sobre un clon desechable
+
+Para ver una red más grande sin tocar nada tuyo, cloná este mismo repo (o cualquier otro) en una carpeta temporal, dejá que Claude haga de todo y después borrá el clon. Probado el 2026-10-03 con Claude Code 2.1.288: la red se mantuvo en 114 nodos, el subagente con worktree se vio sobre `src/cli/` con la etiqueta "worktree" y `~/.claude/settings.json` quedó idéntico al cerrar.
+
+```bash
+git clone ~/Desktop/projects/claude-live-viewer /tmp/neurons-clon
+cd /tmp/neurons-clon && neu            # terminal 1: abre la página
+cd /tmp/neurons-clon && claude         # terminal 2
+```
+
+Prompt:
+
+```text
+Este es un clon desechable de Neurons, así que podés cambiar lo que quieras. Hacé esto en orden y respondé corto al final:
+1. Buscá con grep dónde se usa "bashEditDiff" en src/ y listá los archivos .ts de web/src.
+2. Leé src/server/server.ts, src/server/attribution.ts y web/src/effects.ts.
+3. En src/server/eventlog.ts agregá arriba de todo un comentario de una línea: "// demo: edición vista en Neurons".
+4. Creá docs/notas-demo.md con tres líneas que resuman qué hace attribution.ts.
+5. Renombrá docs/PAYLOADS.md a docs/payloads-fase0.md con git mv.
+6. Borrá scripts/make-demo-repo.sh con rm.
+7. Corré "cat no-existe.txt" (va a fallar, es a propósito).
+8. Lanzá dos subagentes en paralelo: uno con la herramienta Agent e isolation "worktree" que lea todo src/cli/ y te diga qué comandos hay, y otro sin worktree que lea test/unit/attribution.test.ts y te diga cuántos casos prueba.
+9. Con lo que te digan, agregá una línea al final de docs/notas-demo.md.
+```
+
+Para descartar: `neu stop` (o `Ctrl+C` en la terminal 1) y `rm -rf /tmp/neurons-clon`.
