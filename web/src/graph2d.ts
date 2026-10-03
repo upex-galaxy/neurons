@@ -1,5 +1,5 @@
-// 2D view: force-graph on a canvas, same model and effects as the 3D view. Halos and the
-// active glow are drawn with nodeCanvasObjectMode 'after', only for glowing nodes.
+// 2D view: force-graph on a canvas, same model and effects as the 3D view. Halos, session
+// rings and the active glow are drawn with nodeCanvasObjectMode 'after', only for glowing nodes.
 import ForceGraph from 'force-graph';
 import { Color } from 'three';
 import { GlowBook, idleColor, newSample, type GlowSample } from './glow.ts';
@@ -119,6 +119,13 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
         ctx.lineWidth = Math.max(1.2, 2.4 / Math.sqrt(scale));
         ctx.beginPath();
         ctx.arc(x, y, r + 2.2, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (s.ring && s.ringAlpha > 0) {
+        // Session tint: thinner and a little wider than a subagent halo.
+        ctx.strokeStyle = css(s.ring, s.ringAlpha);
+        ctx.lineWidth = Math.max(0.7, 1.3 / Math.sqrt(scale));
+        ctx.beginPath();
+        ctx.arc(x, y, r + 3, 0, Math.PI * 2);
         ctx.stroke();
       }
       ctx.restore();

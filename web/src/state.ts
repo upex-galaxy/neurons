@@ -64,6 +64,10 @@ export interface VizState {
   counters: Partial<Record<Action, number>>;
   failCount: number;
   filters: Filters;
+  /** Hue per main session (no "external"), in order of first appearance. */
+  sessionColors: Record<string, string>;
+  /** Two or more sessions are active: session rings, feed borders and the legend show. */
+  multiSession: boolean;
   fps: number;
   lastEventLatencyMs: number | null;
   connected: boolean;
@@ -130,6 +134,8 @@ export function createState(): VizState {
     counters: {},
     failCount: 0,
     filters: { session: '', agent: '', showExternal: true },
+    sessionColors: {},
+    multiSession: false,
     fps: 0,
     lastEventLatencyMs: null,
     connected: false,

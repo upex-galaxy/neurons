@@ -1,5 +1,5 @@
 // Turns a VizEvent into light: particle chains along the tree, node pulses, subagent
-// halos, satellites outside the repo and the pink flash of moves.
+// halos, session rings, satellites outside the repo and the pink flash of moves.
 import { Color } from 'three';
 import { ACTION_COLORS, EXTERNAL_COLOR, FAIL_COLOR, type TreeEntry, type VizEvent } from '../../src/shared/types.ts';
 import { BACKGROUND, type ParticleStyle, type Renderer } from './renderer.ts';
@@ -21,6 +21,8 @@ interface EventStyle {
   blinks: number;
   color: string;
   halo?: string;
+  /** Session hue on the target node (main-agent events, several sessions active). */
+  ring?: string;
 }
 
 export interface EffectsContext {
@@ -28,6 +30,8 @@ export interface EffectsContext {
   /** Current renderer (it changes when toggling 3D/2D). */
   view(): Renderer;
   agentColor(agentId: string): string;
+  /** Session ring for the event's target, or undefined (see sessions.ts sessionRing). */
+  sessionRing(event: VizEvent): string | undefined;
   /** Called once per event, when its first particle leaves the root. */
   onFirstEmit(event: VizEvent): void;
   /**
@@ -87,7 +91,12 @@ function lightPath(ctx: EffectsContext, later: Later, path: string, style: Event
   }
   const arrival = hops === 0 ? 0 : (hops - 1) * HOP_INTERVAL_MS + HOP_TRAVEL_MS;
   later(() => {
-    const opts = { intensity: style.pulse, blinks: style.blinks, ...(style.halo ? { halo: style.halo } : {}) };
+    const opts = {
+      intensity: style.pulse,
+      blinks: style.blinks,
+      ...(style.halo ? { halo: style.halo } : {}),
+      ...(style.ring ? { ring: style.ring } : {}),
+    };
     ctx.view().pulse(target, style.color, opts);
   }, arrival);
   if (hops === 0) onEmit();
@@ -122,7 +131,9 @@ function flashInto(ctx: EffectsContext, later: Later, path: string, color: strin
 /** Renders one live event. History (hello.recent) must not go through here. */
 export function playEvent(ctx: EffectsContext, event: VizEvent): void {
   const halo = event.agentId && !event.external ? ctx.agentColor(event.agentId) : undefined;
+  const ring = halo ? undefined : ctx.sessionRing(event);
   const style = styleFor(event, halo);
+  if (ring) style.ring = ring;
   const gen = ctx.generation();
   const later: Later = (fn, ms) => {
     setTimeout(() => {
@@ -159,7 +170,7 @@ export function playEvent(ctx: EffectsContext, event: VizEvent): void {
   if (paths.length > 0 || event.outsideRepo?.length) return;
 
   const rootPulse = (intensity: number, durationMs: number): void => {
-    const opts = { intensity, durationMs, ...(halo ? { halo } : {}) };
+    const opts = { intensity, durationMs, ...(halo ? { halo } : {}), ...(ring ? { ring } : {}) };
     ctx.view().pulse(ROOT_ID, ACTION_COLORS[event.action], opts);
     onEmit();
   };

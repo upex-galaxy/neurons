@@ -1,5 +1,5 @@
-// Glow state shared by the 3D and 2D renderers: pulses, fade-outs, subagent halos and
-// residual heat. Only nodes with an active glow are sampled per frame.
+// Glow state shared by the 3D and 2D renderers: pulses, fade-outs, subagent halos, session
+// rings and residual heat. Only nodes with an active glow are sampled per frame.
 import { Color } from 'three';
 
 export const GLOW_DURATION_MS = 3500;
@@ -17,11 +17,14 @@ export interface PulseOptions {
   blinks?: number;
   /** Subagent hue: draws a ring around the node while it glows. */
   halo?: string;
+  /** Session hue: a thinner ring for main-agent events when several sessions are active. */
+  ring?: string;
 }
 
 interface Glow {
   color: Color;
   halo: Color | null;
+  ring: Color | null;
   start: number;
   duration: number;
   peak: number;
@@ -37,6 +40,9 @@ export interface GlowSample {
   scale: number;
   halo: Color | null;
   haloAlpha: number;
+  /** Session ring (thin), drawn only when there is no halo. */
+  ring: Color | null;
+  ringAlpha: number;
   /** False once the glow is over: the renderer restores the idle look and stops sampling. */
   alive: boolean;
 }
@@ -59,11 +65,17 @@ export class GlowBook {
     const peak = opts.intensity;
     if (prev) {
       const prevK = prev.peak * (1 - (now - prev.start) / prev.duration) ** 2;
-      if (prevK > peak && !opts.halo) return;
+      if (prevK > peak && !opts.halo) {
+        // The stronger glow stays as it is (color, blinks, subagent halo). A session ring
+        // is only attached to it, so the session still reads on a node without a halo.
+        if (opts.ring && !prev.halo) prev.ring = new Color(opts.ring);
+        return;
+      }
     }
     this.glows.set(id, {
       color: new Color(color),
       halo: opts.halo ? new Color(opts.halo) : null,
+      ring: opts.halo || !opts.ring ? null : new Color(opts.ring),
       start: now,
       duration: opts.durationMs ?? GLOW_DURATION_MS,
       peak,
@@ -76,6 +88,7 @@ export class GlowBook {
     this.glows.set(id, {
       color: new Color(REMOVE_COLOR),
       halo: null,
+      ring: null,
       start: now,
       duration: FADE_OUT_MS,
       peak: 1,
@@ -118,6 +131,8 @@ export class GlowBook {
     const t = (now - glow.start) / glow.duration;
     out.halo = null;
     out.haloAlpha = 0;
+    out.ring = null;
+    out.ringAlpha = 0;
     if (glow.fade) {
       const k = Math.min(1, Math.max(0, t));
       out.color.copy(glow.color).multiplyScalar(1.2 * (1 - k) + 0.2);
@@ -147,6 +162,10 @@ export class GlowBook {
       out.halo = glow.halo;
       // The ring outlives the core flash a little so the agent stays readable.
       out.haloAlpha = Math.min(1, 0.25 + 1.2 * (1 - t));
+    } else if (glow.ring) {
+      out.ring = glow.ring;
+      // Same long tail as the halo, a bit softer: it names the session, not the action.
+      out.ringAlpha = Math.min(0.9, 0.2 + 1.1 * (1 - t));
     }
     out.alive = true;
     return true;
@@ -154,5 +173,5 @@ export class GlowBook {
 }
 
 export function newSample(): GlowSample {
-  return { color: new Color(), opacity: 1, scale: 1, halo: null, haloAlpha: 0, alive: false };
+  return { color: new Color(), opacity: 1, scale: 1, halo: null, haloAlpha: 0, ring: null, ringAlpha: 0, alive: false };
 }

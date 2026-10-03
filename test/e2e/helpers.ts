@@ -14,6 +14,8 @@ export interface VizStateLite {
   feed: { id: string; action: string; phase: string; path: string; agentId?: string; external?: boolean }[];
   feedShown: number;
   counters: Record<string, number | undefined>;
+  sessionColors: Record<string, string>;
+  multiSession: boolean;
   failCount: number;
   fps: number;
   lastEventLatencyMs: number | null;
@@ -42,7 +44,7 @@ export async function openViewer(page: Page, port: number, query = ''): Promise<
 
 /** POSTs one raw payload like Claude Code does and checks the 204 with an empty body. */
 export async function postHook(request: APIRequestContext, port: number, body: string): Promise<void> {
-  const res = await request.post(`${baseUrl(port)}/hook?src=repo-synapse`, {
+  const res = await request.post(`${baseUrl(port)}/hook?src=neurons`, {
     headers: { 'content-type': 'application/json' },
     data: body,
   });

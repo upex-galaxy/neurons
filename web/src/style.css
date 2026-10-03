@@ -358,6 +358,77 @@ body.panel-closed #panel {
   font-size: 12px;
 }
 
+.sess-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 3px;
+  border-radius: 50%;
+  background: var(--s);
+  vertical-align: 0;
+}
+
+.sess-dot[hidden] {
+  display: none;
+}
+
+.session-legend {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.session-legend[hidden] {
+  display: none;
+}
+
+.sess-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.sess-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+}
+
+.sess-chip::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--s);
+  box-shadow: 0 0 5px var(--s);
+}
+
+.sess-chip:hover,
+.sess-chip[aria-pressed='true'] {
+  color: var(--s);
+}
+
+.sess-chip[aria-pressed='true'] {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.sess-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -433,6 +504,16 @@ body.panel-closed #panel {
   padding: 4px 0 4px 8px;
   border-left: 2px solid var(--c);
   margin-bottom: 3px;
+}
+
+/* Several sessions active: the row border takes the session hue (the chip keeps the action). */
+body.multi-session .feed .row.tinted {
+  border-left: 3px solid var(--s);
+  padding-left: 7px;
+}
+
+body.multi-session .feed .row.tinted .sess {
+  color: var(--s);
 }
 
 .feed time {
@@ -549,6 +630,12 @@ body.panel-closed #panel {
   border: 2px solid var(--c);
   width: 7px;
   height: 7px;
+}
+
+.legend li.ring.thin::before {
+  border-width: 1px;
+  width: 9px;
+  height: 9px;
 }
 
 .legend li.big::before {

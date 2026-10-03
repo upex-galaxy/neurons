@@ -1,15 +1,19 @@
-// Side panel (Spanish UI): live feed, counters, filters, view toggle and legend.
+// Side panel (Spanish UI): live feed, counters, filters, view toggle, session tint and legend.
 import { ACTION_COLORS, EXTERNAL_COLOR, FAIL_COLOR, type Action } from '../../src/shared/types.ts';
 import { agentColor, agentType, knownAgents, shortId } from './agents.ts';
 import { ACTION_LABELS, EXTRA_COUNTER_ACTIONS, FAIL_LABEL, LEGEND_ACTIONS, MAIN_AGENT_LABEL } from './labels.ts';
 import type { RendererKind } from './renderer.ts';
+import { sessionPalette } from './sessions.ts';
 import { FEED_LIMIT, type FeedItem, type Filters } from './state.ts';
 import { MAIN_AGENT } from './store.ts';
 
 export interface SessionRow {
   sessionId: string;
   firstSeen: number;
+  lastSeen: number;
   ended: boolean;
+  /** Ended by /clear (see SessionInfo.cleared). */
+  cleared?: boolean;
 }
 
 export interface PanelHandlers {
@@ -50,6 +54,9 @@ export class Panel {
   private readonly sessionSel = el<HTMLSelectElement>('f-session');
   private readonly agentSel = el<HTMLSelectElement>('f-agent');
   private readonly externalBox = el<HTMLInputElement>('f-external');
+  private readonly sessionDot = el('f-session-dot');
+  private readonly sessionLegend = el('session-legend');
+  private readonly sessionChips = el('session-chips');
   private readonly counterCells = new Map<string, HTMLElement>();
   private pending: FeedItem[] = [];
   private queued = false;
@@ -87,6 +94,7 @@ export class Panel {
       agent: this.agentSel.value,
       showExternal: this.externalBox.checked,
     };
+    this.syncSessionMarks();
     this.handlers.onFilters({ ...this.filters });
   }
 
@@ -98,6 +106,7 @@ export class Panel {
     this.sessionSel.value = f.session;
     this.agentSel.value = f.agent;
     this.externalBox.checked = f.showExternal;
+    this.syncSessionMarks();
   }
 
   private ensureOption(sel: HTMLSelectElement, value: string, text: string): void {
@@ -112,18 +121,65 @@ export class Panel {
     }
   }
 
-  setSessions(sessions: SessionRow[]): void {
+  /**
+   * Rebuilds the session filter. `active` lists the sessions that count for the tint: with
+   * two or more, options get a colored dot, feed rows a border in the session hue and the
+   * "Sesiones" line shows. With one, the panel looks as before.
+   */
+  setSessions(sessions: SessionRow[], active: readonly string[] = []): void {
+    const multi = active.length >= 2;
+    document.body.classList.toggle('multi-session', multi);
     const current = this.filters.session;
     const opts = [new Option('Todas las sesiones', '')];
     const sorted = [...sessions].sort((a, b) => b.firstSeen - a.firstSeen);
     for (const s of sorted) {
       const d = new Date(s.firstSeen);
-      const text = `${shortId(s.sessionId)} · ${pad(d.getHours())}:${pad(d.getMinutes())}${s.ended ? ' · terminada' : ''}`;
-      opts.push(new Option(text, s.sessionId));
+      const color = multi ? sessionPalette.peek(s.sessionId) : undefined;
+      const text = `${color ? '● ' : ''}${shortId(s.sessionId)} · ${pad(d.getHours())}:${pad(d.getMinutes())}${s.ended ? ' · terminada' : ''}`;
+      const opt = new Option(text, s.sessionId);
+      if (color) opt.style.color = color;
+      opts.push(opt);
     }
     if (current && !sorted.some((s) => s.sessionId === current)) opts.push(new Option(shortId(current), current));
     this.sessionSel.replaceChildren(...opts);
     this.sessionSel.value = current;
+
+    const chips: HTMLButtonElement[] = [];
+    if (multi) {
+      // Palette order (first appearance), so the line does not reshuffle as sessions talk.
+      const shown = new Set(active);
+      for (const id of sessionPalette.ids()) {
+        if (!shown.has(id)) continue;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'sess-chip';
+        btn.dataset.session = id;
+        btn.style.setProperty('--s', sessionPalette.peek(id) ?? 'transparent');
+        btn.textContent = shortId(id);
+        btn.addEventListener('click', () => {
+          this.sessionSel.value = this.filters.session === id ? '' : id;
+          this.emitFilters();
+        });
+        chips.push(btn);
+      }
+    }
+    this.sessionChips.replaceChildren(...chips);
+    this.sessionLegend.hidden = !multi;
+    this.syncSessionMarks();
+  }
+
+  /** Dot next to the session select and pressed state of the "Sesiones" chips. */
+  private syncSessionMarks(): void {
+    const current = this.filters.session;
+    const multi = document.body.classList.contains('multi-session');
+    const color = multi && current ? sessionPalette.peek(current) : undefined;
+    this.sessionDot.hidden = !color;
+    if (color) this.sessionDot.style.setProperty('--s', color);
+    for (const btn of this.sessionChips.querySelectorAll<HTMLButtonElement>('.sess-chip')) {
+      const on = btn.dataset.session === current;
+      btn.setAttribute('aria-pressed', String(on));
+      btn.title = on ? `Sesión ${btn.dataset.session}: clic para ver todas` : `Sesión ${btn.dataset.session}: clic para filtrar`;
+    }
   }
 
   refreshAgents(): void {
@@ -184,6 +240,12 @@ export class Panel {
     const li = document.createElement('li');
     li.className = `row phase-${item.phase}${item.external ? ' external' : ''}`;
     li.style.setProperty('--c', chipColor(item));
+    // Session hue for the left border; CSS only shows it while several sessions are active.
+    const sessionHue = item.external ? undefined : sessionPalette.peek(item.sessionId);
+    if (sessionHue) {
+      li.style.setProperty('--s', sessionHue);
+      li.classList.add('tinted');
+    }
 
     const time = document.createElement('time');
     time.dateTime = new Date(item.ts).toISOString();
@@ -264,6 +326,7 @@ export class Panel {
     item(FAIL_COLOR, 'fallo');
     item(EXTERNAL_COLOR, 'cambio externo (gris tenue)', 'dim');
     item('#38bdf8', 'anillo de color: subagente (un tono por agente)', 'ring');
+    item('#e9a17a', 'anillo fino: sesión (con 2 o más sesiones activas)', 'ring thin');
     item('#fdba74', 'brillo residual: archivos más tocados', 'heat');
     item('#5b4a8a', 'fuera del repo (~/.claude, /tmp…)');
     item('#2f5d8f', 'carpeta colapsada: clic para abrir', 'big');

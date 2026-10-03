@@ -12,6 +12,7 @@ import { LabelOverlay, MAX_OVERLAY_LABELS, type OverlayItem } from './overlay.ts
 import { Panel, type SessionRow } from './panel.ts';
 import { escapeHtml, type Renderer, type RendererKind, type RendererOptions } from './renderer.ts';
 import { ReplayController } from './replay.ts';
+import { activeSessions, endOpenSessions, sessionPalette, sessionRing } from './sessions.ts';
 import { FEED_LIMIT, pushBounded, resetState, startFpsMeter, vizState, type Filters } from './state.ts';
 import { EventStore, accumulate, emptyAggregate, heatIntensity, passes, type Aggregate } from './store.ts';
 import { OUTSIDE_HUB_ID, ROOT_ID, TreeModel, pinOutside, type VizNode } from './treeModel.ts';
@@ -27,7 +28,9 @@ const SEED_JITTER = 4;
 const HEAT_INTERVAL_MS = 100;
 const BUDGET = Number(params.get('budget')) > 0 ? Number(params.get('budget')) : 1500;
 const SOCKET_ENABLED = params.get('ws') !== '0';
-const VIEW_KEY = 'repo-synapse:view';
+const VIEW_KEY = 'neurons:view';
+/** Key the versions named repo-synapse saved the view under: read when there is no new one. */
+const LEGACY_VIEW_KEY = 'repo-synapse:view';
 
 function el<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -42,6 +45,10 @@ const store = new EventStore();
 let agg: Aggregate = emptyAggregate();
 const sessions = new Map<string, SessionRow>();
 let lastHello: Hello | null = null;
+/** Newest event ts seen since the last reset: the clock of the session tint in replay. */
+let lastEventTs = 0;
+/** Sessions that counted for the tint at the last check, joined (detects changes). */
+let activeKey = '';
 
 // ---------- renderer ----------
 
@@ -69,7 +76,7 @@ function makeRenderer(kind: RendererKind): Renderer {
       return createGraph3D(graphEl, rendererOptions);
     } catch (err) {
       // No WebGL: fall back to the canvas view.
-      console.warn('[repo-synapse] 3D no disponible, uso 2D', err);
+      console.warn('[neurons] 3D no disponible, uso 2D', err);
       graphEl.replaceChildren();
     }
   }
@@ -80,7 +87,7 @@ function initialKind(): RendererKind {
   const q = params.get('view');
   if (q === '2d' || q === '3d') return q;
   try {
-    const saved = localStorage.getItem(VIEW_KEY);
+    const saved = localStorage.getItem(VIEW_KEY) ?? localStorage.getItem(LEGACY_VIEW_KEY);
     if (saved === '2d' || saved === '3d') return saved;
   } catch {
     // Storage blocked: default view.
@@ -97,6 +104,10 @@ const ctx: EffectsContext = {
   model,
   view: () => view,
   agentColor,
+  sessionRing(event) {
+    syncMultiSession();
+    return sessionRing(event, sessionPalette.peek(event.sessionId), vizState.multiSession);
+  },
   onFirstEmit(event) {
     if (!vizState.replay.active) vizState.lastEventLatencyMs = Date.now() - event.ts;
   },
@@ -333,17 +344,56 @@ function stage(event: VizEvent): void {
   playEvent(ctx, event);
 }
 
+/** Now for the session tint: the wall clock live, the log's own time in replay. */
+function tintClock(): number {
+  return vizState.replay.active ? lastEventTs : Date.now();
+}
+
+function assignSessionColor(sessionId: string): void {
+  const color = sessionPalette.assign(sessionId);
+  if (color && vizState.sessionColors[sessionId] !== color) vizState.sessionColors[sessionId] = color;
+}
+
+/** Recomputes which sessions count for the tint; marks the panel dirty when that changed. */
+function syncMultiSession(): string[] {
+  const active = activeSessions(sessions.values(), tintClock());
+  const multi = active.length >= 2;
+  const key = active.join(',');
+  if (multi !== vizState.multiSession || key !== activeKey) {
+    vizState.multiSession = multi;
+    activeKey = key;
+    sessionsDirty = true;
+  }
+  return active;
+}
+
 /** Records an event (feed, counters, heat) and, when `animate`, lights it up. */
 function ingest(event: VizEvent, animate: boolean): void {
   if (event.agentId && rememberAgent(event.agentId, event.agentType)) agentsDirty = true;
+  if (event.ts > lastEventTs) lastEventTs = event.ts;
   const known = sessions.get(event.sessionId);
   if (!known) {
-    sessions.set(event.sessionId, { sessionId: event.sessionId, firstSeen: event.ts, ended: event.action === 'session_end' });
+    sessions.set(event.sessionId, {
+      sessionId: event.sessionId,
+      firstSeen: event.ts,
+      lastSeen: event.ts,
+      ended: event.action === 'session_end',
+      ...(event.action === 'session_end' && event.detail === 'clear' ? { cleared: true } : {}),
+    });
     sessionsDirty = true;
-  } else if (event.action === 'session_end' && !known.ended) {
-    known.ended = true;
-    sessionsDirty = true;
+  } else {
+    if (event.ts > known.lastSeen) known.lastSeen = event.ts;
+    if (event.action === 'session_end' && !known.ended) {
+      known.ended = true;
+      if (event.detail === 'clear') known.cleared = true;
+      sessionsDirty = true;
+    } else if (event.action === 'session_start' && known.ended) {
+      known.ended = false;
+      delete known.cleared;
+      sessionsDirty = true;
+    }
   }
+  assignSessionColor(event.sessionId);
   for (const abs of event.outsideRepo ?? []) {
     if (model.addOutside(abs).created.length) outsideDirty = true;
   }
@@ -369,9 +419,13 @@ function ingest(event: VizEvent, animate: boolean): void {
 
 function updateSessions(list: SessionInfo[]): void {
   for (const s of list) {
-    sessions.set(s.sessionId, { sessionId: s.sessionId, firstSeen: s.firstSeen, ended: s.ended });
+    const lastSeen = Math.max(s.lastSeen, sessions.get(s.sessionId)?.lastSeen ?? 0);
+    sessions.set(s.sessionId, { sessionId: s.sessionId, firstSeen: s.firstSeen, lastSeen, ended: s.ended, ...(s.cleared ? { cleared: true } : {}) });
     for (const [id, type] of Object.entries(s.agents)) if (rememberAgent(id, type)) agentsDirty = true;
   }
+  // First appearance = firstSeen, so a reload gives every session the same hue again.
+  sessionPalette.assignAll(list);
+  for (const s of list) assignSessionColor(s.sessionId);
   sessionsDirty = true;
 }
 
@@ -384,6 +438,9 @@ function resetAll(tree: TreeSnapshot, mode: 'live' | 'replay'): void {
   agg = emptyAggregate();
   vizState.counters = agg.counters;
   sessions.clear();
+  sessionPalette.clear();
+  lastEventTs = 0;
+  activeKey = '';
   sessionsDirty = true;
   pendingAdded = [];
   pendingRemoved = [];
@@ -520,6 +577,9 @@ const replay = new ReplayController({
     model.purge(r.removing);
   },
   snapshot(tree, animate) {
+    // A new server run in the log: sessions the previous run never saw end are over (the
+    // hooks were removed when it closed). One that goes on reopens with its session_start.
+    if (endOpenSessions(sessions.values())) sessionsDirty = true;
     generation++;
     pendingAdded = [];
     pendingRemoved = [];
@@ -562,9 +622,10 @@ setInterval(() => {
     countersDirty = false;
     panel.setCounters(agg.counters, agg.fails);
   }
+  const active = syncMultiSession();
   if (sessionsDirty) {
     sessionsDirty = false;
-    panel.setSessions([...sessions.values()]);
+    panel.setSessions([...sessions.values()], active);
   }
   if (agentsDirty) {
     agentsDirty = false;

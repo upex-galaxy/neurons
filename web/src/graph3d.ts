@@ -43,35 +43,46 @@ const UNIT_LOW = new SphereGeometry(1, 6, 6);
 const UNIT_HIGH = new SphereGeometry(1, 10, 8);
 
 interface NodeMesh extends Mesh<SphereGeometry, MeshBasicMaterial> {
-  userData: { id: string; base: Color; radius: number; opacity: number; halo?: Sprite };
+  userData: { id: string; base: Color; radius: number; opacity: number; halo?: Sprite; ring?: Sprite };
 }
 
 let ringBase: CanvasTexture | null = null;
+let thinRingBase: CanvasTexture | null = null;
+
+function drawRing(lineWidth: number, blur: number, radius: number): CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const c = canvas.getContext('2d')!;
+  c.strokeStyle = '#ffffff';
+  c.shadowColor = '#ffffff';
+  c.shadowBlur = blur;
+  c.lineWidth = lineWidth;
+  c.beginPath();
+  c.arc(32, 32, radius, 0, Math.PI * 2);
+  c.stroke();
+  return new CanvasTexture(canvas);
+}
+
 /**
  * A soft ring on a transparent canvas, used for subagent halos. Each user gets a clone:
  * clones share one GPU upload, and the library disposes the clone with its sprite.
  */
 function ringTexture(): CanvasTexture {
-  if (!ringBase) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 64;
-    canvas.height = 64;
-    const c = canvas.getContext('2d')!;
-    c.strokeStyle = '#ffffff';
-    c.shadowColor = '#ffffff';
-    c.shadowBlur = 6;
-    c.lineWidth = 5;
-    c.beginPath();
-    c.arc(32, 32, 24, 0, Math.PI * 2);
-    c.stroke();
-    ringBase = new CanvasTexture(canvas);
-  }
+  ringBase ??= drawRing(5, 6, 24);
   return ringBase.clone();
 }
 
-function haloSprite(color: Color): Sprite {
+/** Thin, wider ring for the session tint, so it never reads as a subagent halo. */
+function thinRingTexture(): CanvasTexture {
+  thinRingBase ??= drawRing(2, 3, 27);
+  return thinRingBase.clone();
+}
+
+function haloSprite(color: Color, thin = false): Sprite {
+  const map = thin ? thinRingTexture() : ringTexture();
   const sprite = new Sprite(
-    new SpriteMaterial({ map: ringTexture(), color, transparent: true, depthWrite: false, blending: AdditiveBlending }),
+    new SpriteMaterial({ map, color, transparent: true, depthWrite: false, blending: AdditiveBlending }),
   );
   sprite.renderOrder = 2;
   return sprite;
@@ -211,6 +222,7 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
     mesh.material.opacity = u.opacity;
     mesh.scale.setScalar(u.radius);
     if (u.halo) u.halo.visible = false;
+    if (u.ring) u.ring.visible = false;
   }
 
   // Per-frame work touches only glowing nodes and live link flashes.
@@ -245,6 +257,18 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
         u.halo.visible = true;
       } else if (u.halo) {
         u.halo.visible = false;
+      }
+      if (sample.ring) {
+        if (!u.ring) {
+          u.ring = haloSprite(sample.ring.clone(), true);
+          u.ring.scale.set(5.2, 5.2, 1);
+          mesh.add(u.ring);
+        }
+        u.ring.material.color.copy(sample.ring).multiplyScalar(1.25);
+        u.ring.material.opacity = sample.ringAlpha;
+        u.ring.visible = true;
+      } else if (u.ring) {
+        u.ring.visible = false;
       }
       if (!sample.alive && sample.scale !== 0) applyIdle(mesh);
     }

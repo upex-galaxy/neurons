@@ -32,6 +32,42 @@ function r1(i: number, hook: string, tool?: string): string {
   return line;
 }
 
+/** "#rrggbb" as getComputedStyle prints it. */
+function rgb(hex: string): string {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+}
+
+// First on purpose: the server is fresh, so these are the only two sessions it has seen.
+test('dos sesiones en el mismo repo: un tono por sesión en el estado y en el feed', async ({ page, request }) => {
+  await openViewer(page, PORT);
+  const s1 = (JSON.parse(run1[0]!) as { session_id: string }).session_id;
+  const s2 = '7c1e5a90-0b6e-4d3f-9a43-2f6c1d8e7b21';
+  const asS2 = (l: string) => l.replaceAll(s1, s2);
+
+  await postHook(request, PORT, r1(5, 'PreToolUse', 'Read'));
+  await postHook(request, PORT, r1(6, 'PostToolUse', 'Read'));
+  await postHook(request, PORT, asS2(run1[5]!));
+  await postHook(request, PORT, asS2(run1[6]!));
+
+  await expect.poll(async () => Object.keys((await vizState(page)).sessionColors).sort()).toEqual([s1, s2].sort());
+  await expect.poll(async () => (await vizState(page)).multiSession).toBe(true);
+  const colors = (await vizState(page)).sessionColors;
+  expect(colors[s1]).not.toBe(colors[s2]);
+
+  // Panel: "Sesiones" line with one chip per session, and feed borders in the session hue.
+  await expect(page.locator('#session-legend')).toBeVisible();
+  await expect(page.locator('#session-legend .sess-chip')).toHaveCount(2);
+  const rowOf = (id: string) => page.locator('#feed .row').filter({ has: page.locator(`.sess[title="Sesión ${id}"]`) }).first();
+  await expect(rowOf(s1)).toHaveCSS('border-left-color', rgb(colors[s1]!));
+  await expect(rowOf(s2)).toHaveCSS('border-left-color', rgb(colors[s2]!));
+  await expect(rowOf(s2)).toHaveCSS('border-left-width', '3px');
+  // The action chip keeps the action color (lectura is cyan in both sessions).
+  const chip = rowOf(s2).locator('.chip-action');
+  await expect(chip).toHaveText('lectura');
+  await expect(chip).toHaveCSS('color', rgb('#22d3ee'));
+});
+
 test('hooks reales: feed, contadores, nodos activos, creados y borrados', async ({ page, request }) => {
   await openViewer(page, PORT);
   const base = await vizState(page);
@@ -115,7 +151,7 @@ test('hooks reales: feed, contadores, nodos activos, creados y borrados', async 
   await test.step('sin contenido de archivos ni hooks instalados', async () => {
     // Text that only exists inside file contents and stdout of the payloads.
     await expect(page.locator('body')).not.toContainText('validate id');
-    const log = fs.readFileSync(path.join(repo, '.repo-synapse', 'events.jsonl'), 'utf8');
+    const log = fs.readFileSync(path.join(repo, '.neurons', 'events.jsonl'), 'utf8');
     expect(log).not.toContain('validate id');
     expect(log).not.toContain('export const ok');
     // start --no-install touches neither the repo settings nor the user config.

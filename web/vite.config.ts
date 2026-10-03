@@ -20,7 +20,7 @@ export default defineConfig({
   server: {
     // `vite --config web/vite.config.ts` in dev proxies the socket to a running server.
     // The server only accepts its own Origin: start it with
-    // REPO_SYNAPSE_ALLOWED_ORIGINS=http://localhost:5173 so the dev page can connect.
+    // NEURONS_ALLOWED_ORIGINS=http://localhost:5173 so the dev page can connect.
     // Do not use rewriteWsOrigin: it would let any page reach the socket through Vite.
     proxy: {
       '/ws': { target: 'ws://127.0.0.1:7777', ws: true },
