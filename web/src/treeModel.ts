@@ -385,6 +385,16 @@ export class TreeModel {
   }
 
   /**
+   * `path` when it has a node, else its deepest ancestor that has one (ROOT_ID at worst).
+   * Repo paths only. A worktree event may name a file that exists only in the worktree.
+   */
+  existing(path: string): string {
+    let target = normalizePath(path);
+    while (target !== ROOT_ID && !this.nodes.has(target)) target = parentPath(target);
+    return target;
+  }
+
+  /**
    * Visible nodes from the root down to the path (or its deepest existing ancestor).
    * Repo paths start at the root; absolute paths start at the outside hub.
    */

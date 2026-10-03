@@ -27,7 +27,7 @@ import {
 import { Attributor, type Attribution, type DiskChange, type Owner } from './attribution.ts';
 import { EventLog, readLog } from './eventlog.ts';
 import { Normalizer, parseHookPayload, type HookPayload } from './normalize.ts';
-import { createPathResolver } from './paths.ts';
+import { createPathResolver, isWorktreeRel } from './paths.ts';
 import { isExcludedRel, isGitIgnored, scanTree, TreeIndex } from './tree.ts';
 import { startWatcher, type WatcherHandle } from './watcher.ts';
 
@@ -403,6 +403,12 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
     attributor.onHook(p);
     const events = normalizer.normalize(p);
     for (const ev of events) {
+      // Paths in a subagent worktree were rewritten to the main repo, where the change did
+      // not happen: light them, but leave the tree and the watcher dedupe alone.
+      if (ev.worktree !== undefined) {
+        emitEvent(ev);
+        continue;
+      }
       const exact = isExactFileChange(p, ev);
       if (!exact && !isBashGuess(p, ev)) {
         emitEvent(ev);
@@ -470,6 +476,8 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
 
   function onDiskChange(c: DiskChange): void {
     if (!attributor) return;
+    // The watcher already drops subagent worktrees; never attribute or index one anyway.
+    if (isWorktreeRel(c.path) || (c.from !== undefined && isWorktreeRel(c.from))) return;
     try {
       const added: TreeEntry[] = [];
       const removed: string[] = [];

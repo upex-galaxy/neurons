@@ -188,11 +188,16 @@ export function playEvent(ctx: EffectsContext, event: VizEvent): void {
   }
 }
 
-/** Paths an event wants visible (repo paths and move sources); used to auto-expand collapsed dirs. */
-export function eventTargets(event: VizEvent): string[] {
+/**
+ * Paths an event wants visible (repo paths and move sources); used to auto-expand collapsed
+ * dirs. With `model`, a worktree event's path that is not in the main tree (a file the
+ * subagent created only in its worktree) becomes its deepest existing ancestor.
+ */
+export function eventTargets(event: VizEvent, model?: TreeModel): string[] {
   const out = event.paths.slice(0, MAX_PATHS_PER_EVENT).map(normalizePath);
   for (const p of event.fromPaths?.slice(0, MAX_PATHS_PER_EVENT) ?? []) out.push(normalizePath(p));
-  return out;
+  if (!event.worktree || !model) return out;
+  return [...new Set(out.map((p) => model.existing(p)))];
 }
 
 /**
@@ -201,7 +206,8 @@ export function eventTargets(event: VizEvent): string[] {
  * would stop the light at the parent dir, so it has to wait for the flush.
  */
 export function waitsForDelta(event: VizEvent, model: TreeModel, pendingAdded: readonly TreeEntry[]): boolean {
-  if (pendingAdded.length === 0) return false;
+  // The server never adds a worktree event's paths to the tree: there is nothing to wait for.
+  if (pendingAdded.length === 0 || event.worktree) return false;
   const missing = new Set(eventTargets(event).filter((p) => model.get(p) === undefined));
   if (missing.size === 0) return false;
   return pendingAdded.some((e) => missing.has(normalizePath(e.path)));

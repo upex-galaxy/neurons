@@ -573,6 +573,22 @@ body.multi-session .feed .row.tinted .sess {
   font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+.feed .path.tagged {
+  grid-column: 1 / -2;
+}
+
+/* Event from a subagent worktree: the path is the main-repo equivalent. */
+.feed .wt-tag {
+  justify-self: end;
+  padding: 0 5px;
+  border: 1px solid color-mix(in srgb, var(--muted) 50%, transparent);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
 .feed .phase-pre {
   opacity: 0.55;
 }

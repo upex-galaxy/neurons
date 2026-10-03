@@ -60,6 +60,48 @@ describe('exclusion helpers', () => {
     expect(isAlwaysExcluded('dist/a.js')).toBe(false);
     expect(isAlwaysExcluded('.github/workflows/ci.yml')).toBe(false);
   });
+
+  it('isAlwaysExcluded also matches Claude Code subagent worktrees under .claude/worktrees', () => {
+    expect(isAlwaysExcluded('.claude/worktrees')).toBe(true);
+    expect(isAlwaysExcluded('.claude/worktrees/agent-x')).toBe(true);
+    expect(isAlwaysExcluded('.claude/worktrees/agent-x/web/src/main.ts')).toBe(true);
+    expect(isAlwaysExcluded('./.claude/worktrees/agent-x/a.ts')).toBe(true);
+    expect(isAlwaysExcluded('.claude/settings.local.json')).toBe(false);
+    expect(isAlwaysExcluded('.claude/worktrees-notes.md')).toBe(false);
+  });
+});
+
+/** A commit, so `git worktree add` has something to check out. Temp repos only. */
+function commitAll(cwd: string): void {
+  git(cwd, 'add', '-A');
+  git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '-m', 'init');
+}
+
+describe('scanTree with a Claude Code subagent worktree', () => {
+  const expected = ['d:.claude', 'f:.claude/settings.json', 'f:.gitignore', 'd:src', 'f:src/a.ts'];
+
+  it('git repo: a real `git worktree add .claude/worktrees/agent-x` is left out, even when not gitignored', async () => {
+    const dir = mkRepo(['.gitignore', 'src/a.ts', '.claude/settings.json']);
+    fs.writeFileSync(path.join(dir, '.gitignore'), '*.log\n');
+    git(dir, 'init', '-q');
+    commitAll(dir);
+    git(dir, 'worktree', 'add', '-q', '--detach', '.claude/worktrees/agent-x');
+    fs.writeFileSync(path.join(dir, '.claude/worktrees/agent-x/src/only-in-worktree.ts'), 'x');
+    expect(fs.existsSync(path.join(dir, '.claude/worktrees/agent-x/src/a.ts'))).toBe(true);
+    expect(paths(await scanTree(dir))).toEqual(expected);
+  });
+
+  it('not a git repo: .claude/worktrees is skipped by the walk', async () => {
+    const dir = mkRepo(['.gitignore', 'src/a.ts', '.claude/settings.json', '.claude/worktrees/agent-x/src/a.ts']);
+    expect(paths(await scanTree(dir))).toEqual(expected);
+  });
+
+  it('TreeIndex.add never takes a worktree path', () => {
+    const idx = new TreeIndex({ root: '/r', name: 'r', truncated: false, entries: [] });
+    expect(idx.add('.claude/worktrees/agent-x/src/a.ts', 'file')).toEqual([]);
+    expect(idx.add('.claude/worktrees', 'dir')).toEqual([]);
+    expect(idx.size).toBe(0);
+  });
 });
 
 describe('scanTree (not a git repo)', () => {

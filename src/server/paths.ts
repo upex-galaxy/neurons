@@ -10,6 +10,31 @@ export function toPosix(p: string): string {
   return p.replace(/\\/g, '/');
 }
 
+/**
+ * Where Claude Code checks out the worktree of a subagent launched with isolation
+ * "worktree" (`git worktree add <root>/.claude/worktrees/agent-<id>`), relative to the root.
+ */
+export const WORKTREES_DIR = '.claude/worktrees';
+
+/** True when `rel` is WORKTREES_DIR or lies under it (a full checkout, never part of the tree). */
+export function isWorktreeRel(rel: string): boolean {
+  return rel === WORKTREES_DIR || rel.startsWith(WORKTREES_DIR + '/');
+}
+
+/**
+ * Splits a repo-relative path inside a Claude Code worktree into the worktree name and the
+ * equivalent path in the main repo ("" for the worktree root). undefined when `rel` is not
+ * inside one (WORKTREES_DIR itself included).
+ */
+export function splitWorktreeRel(rel: string): { worktree: string; rel: string } | undefined {
+  if (!rel.startsWith(WORKTREES_DIR + '/')) return undefined;
+  const rest = rel.slice(WORKTREES_DIR.length + 1);
+  const slash = rest.indexOf('/');
+  const worktree = slash === -1 ? rest : rest.slice(0, slash);
+  if (worktree === '') return undefined;
+  return { worktree, rel: slash === -1 ? '' : rest.slice(slash + 1).replace(/\/+$/, '') };
+}
+
 export interface ResolvedPath {
   /** Absolute path; rewritten onto the realpath'd root when inside. */
   abs: string;

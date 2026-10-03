@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VizEvent } from '../../src/shared/types.ts';
 import type { Filters } from '../src/state.ts';
-import { EventStore, MAIN_AGENT, heatIntensity, passes } from '../src/store.ts';
+import { EventStore, MAIN_AGENT, feedItem, heatIntensity, passes, pathTag } from '../src/store.ts';
 
 let n = 0;
 function ev(partial: Partial<VizEvent>): VizEvent {
@@ -50,5 +50,22 @@ describe('EventStore', () => {
     expect(h.get('a')).toBeCloseTo(0.75);
     expect(h.get('b')).toBeCloseTo(0.3);
     expect(h.has('c')).toBe(false);
+  });
+});
+
+describe('worktree feed tag', () => {
+  it('carries the worktree into the feed item and tags its path', () => {
+    const item = feedItem(ev({ action: 'edit', paths: ['web/src/main.ts'], worktree: 'agent-af7ec553e0c4e91b1', agentId: 'af7' }));
+    expect(item).toMatchObject({ path: 'web/src/main.ts', worktree: 'agent-af7ec553e0c4e91b1' });
+    const tag = pathTag(item);
+    expect(tag?.text).toBe('worktree');
+    expect(tag?.title).toContain('.claude/worktrees/agent-af7ec553e0c4e91b1/');
+    expect(tag?.title).not.toMatch(/[\u2013\u2014]/);
+  });
+
+  it('no tag for a main-repo event', () => {
+    const item = feedItem(ev({ paths: ['web/src/main.ts'] }));
+    expect(item.worktree).toBeUndefined();
+    expect(pathTag(item)).toBeUndefined();
   });
 });

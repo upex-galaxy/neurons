@@ -23,6 +23,8 @@ export const ACTION_LABELS: Record<Action, string> = {
 };
 
 export const FAIL_LABEL = 'fallo';
+/** Tag next to a feed path that a subagent touched in its own worktree. */
+export const WORKTREE_LABEL = 'worktree';
 export const MAIN_AGENT_LABEL = 'principal';
 
 /** Actions shown in the legend and the counters grid. */

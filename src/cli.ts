@@ -31,7 +31,7 @@ import { STOP_TIMEOUT_MS, stopViewer, type StopTarget } from './cli/control.ts';
 import { CliError, err, fail, out } from './cli/output.ts';
 import { listViewers, removeViewerEntry, viewerForRepo, viewerFromLock, writeViewerEntry, type ViewerEntry } from './cli/registry.ts';
 import { resolveRepoRoot } from './cli/repo-root.ts';
-import { findClaudeSessions, sessionWarning } from './cli/sessions.ts';
+import { findClaudeSessions, startHint } from './cli/sessions.ts';
 import { DEFAULT_PORT, LEGACY_STATE_DIR_NAME, STATE_DIR_NAME } from './shared/types.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -376,14 +376,7 @@ async function cmdStart(positionals: string[], o: Options): Promise<number> {
     out(`Repositorio: ${repo}`);
     out('');
     if (o.install) {
-      const sessions = await findClaudeSessions(repo);
-      if (sessions === undefined) {
-        out('Abrí Claude Code en este repositorio (si ya estaba abierto y no ves eventos, reinicialo).');
-      } else if (sessions.length === 0) {
-        out('Abrí Claude Code en este repositorio.');
-      } else {
-        for (const line of sessionWarning(sessions)) out(line);
-      }
+      for (const line of startHint(await findClaudeSessions(repo))) out(line);
     } else {
       out('Los hooks no se instalaron (--no-install): Claude Code no va a enviar eventos.');
     }

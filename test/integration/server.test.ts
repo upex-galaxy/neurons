@@ -685,6 +685,100 @@ describe('one event per real file change (hook vs watcher)', () => {
   });
 });
 
+describe('Claude Code subagent worktrees (.claude/worktrees)', () => {
+  const WT = '.claude/worktrees/agent-x';
+  const SUB = { session_id: 'sess-sub', agent_id: 'agent-x-id', agent_type: 'general-purpose' };
+
+  /** Temp git repo with one commit, so `git worktree add` has something to check out. */
+  function committedRepo(): string {
+    const repo = makeRepo();
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '-m', 'init'], { cwd: repo });
+    return repo;
+  }
+
+  async function treePaths(url: string): Promise<string[]> {
+    const tree = (await (await fetch(url + '/tree')).json()) as TreeSnapshot;
+    return tree.entries.map((e) => e.path);
+  }
+
+  it('a real `git worktree add` (not gitignored) emits nothing and leaves the tree alone, even with another Bash window open', async () => {
+    const { repo, server } = await start({ root: committedRepo() });
+    const client = await connect(server.url);
+    const before = await treePaths(server.url);
+    // Another session's unrelated Bash window: the checkout must not be attributed to it.
+    await post(server.url, { hook_event_name: 'PreToolUse', session_id: 'sess-other', cwd: repo, tool_name: 'Bash', tool_use_id: 'b-other', tool_input: { command: 'sleep 30' } });
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', WT], { cwd: repo });
+    expect(fs.existsSync(path.join(repo, WT, 'src/api/user.ts'))).toBe(true);
+    fs.writeFileSync(path.join(repo, WT, 'src/only-in-worktree.ts'), 'x');
+    fs.writeFileSync(path.join(repo, WT, 'src/api/user.ts'), 'changed in the worktree');
+    // A real change in the main tree still shows, so the watcher was alive all along.
+    await sleep(300);
+    fs.writeFileSync(path.join(repo, 'main-only.ts'), 'x');
+    await waitFor(() => client.events().some((e) => e.paths[0] === 'main-only.ts'), 3000, 'main-tree create');
+    await sleep(300);
+    const watcherEvents = client.events().filter((e) => e.source === 'watcher');
+    expect(watcherEvents.map((e) => e.paths[0])).toEqual(['main-only.ts']);
+    const added = client.messages.flatMap((m) => (m.type === 'tree' ? m.added.map((a) => a.path) : []));
+    expect(added).toEqual(['main-only.ts']);
+    expect(await treePaths(server.url)).toEqual([...before, 'main-only.ts'].sort());
+  });
+
+  it('outside git, files written under .claude/worktrees emit nothing either', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-plain-'));
+    tmpDirs.push(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+    const { server } = await start({ root: repo });
+    const client = await connect(server.url);
+    fs.mkdirSync(path.join(repo, WT, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(repo, WT, 'src/a.ts'), 'x');
+    fs.writeFileSync(path.join(repo, WT, 'a.txt'), 'x');
+    await sleep(500);
+    expect(client.events()).toEqual([]);
+    // `.claude` itself is a normal dir of the repo; only what is under worktrees/ is left out.
+    expect((await treePaths(server.url)).filter((p) => p.includes('worktrees'))).toEqual([]);
+  });
+
+  it('hook events inside the worktree light the main-repo path, carry `worktree` and never change the tree', async () => {
+    const { repo, server } = await start({ root: committedRepo() });
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', WT], { cwd: repo });
+    const real = fs.realpathSync(repo);
+    const client = await connect(server.url);
+    const before = await treePaths(server.url);
+    const cwd = path.join(real, WT);
+
+    const write = { ...SUB, cwd, tool_name: 'Write', tool_use_id: 'w-wt', tool_input: { file_path: path.join(cwd, 'src/new-in-wt.ts'), content: 'x' } };
+    await post(server.url, { ...write, hook_event_name: 'PreToolUse' });
+    fs.writeFileSync(path.join(cwd, 'src/new-in-wt.ts'), 'x');
+    await post(server.url, { ...write, hook_event_name: 'PostToolUse', tool_response: { type: 'create' } });
+    const rm = { ...SUB, cwd, tool_name: 'Bash', tool_use_id: 'b-wt', tool_input: { command: 'rm src/api/user.ts' } };
+    await post(server.url, { ...rm, hook_event_name: 'PreToolUse' });
+    fs.rmSync(path.join(cwd, 'src/api/user.ts'));
+    await post(server.url, {
+      ...rm,
+      hook_event_name: 'PostToolUse',
+      tool_response: { stdout: '', stderr: '', bashEditDiff: { files: [{ filePath: path.join(cwd, 'src/api/user.ts'), deleted: true }], moreFiles: 0 } },
+    });
+    const read = { ...SUB, cwd, tool_name: 'Read', tool_use_id: 'r-wt', tool_input: { file_path: path.join(cwd, 'src/utils/format.ts') } };
+    await post(server.url, { ...read, hook_event_name: 'PostToolUse' });
+    await waitFor(() => client.events().some((e) => e.toolUseId === 'r-wt'), 3000, 'read event');
+    await sleep(300);
+
+    const hookEvents = client.events().filter((e) => e.source === 'hook' && e.toolUseId !== undefined);
+    expect(hookEvents.map((e) => [e.action, e.phase, e.paths, e.worktree])).toEqual([
+      ['create', 'pre', ['src/new-in-wt.ts'], 'agent-x'],
+      ['create', 'post', ['src/new-in-wt.ts'], 'agent-x'],
+      ['delete', 'pre', ['src/api/user.ts'], 'agent-x'],
+      ['delete', 'post', ['src/api/user.ts'], 'agent-x'],
+      ['read', 'post', ['src/utils/format.ts'], 'agent-x'],
+    ]);
+    expect(client.events().filter((e) => e.source === 'watcher')).toEqual([]);
+    expect(client.messages.filter((m) => m.type === 'tree')).toEqual([]);
+    expect(await treePaths(server.url)).toEqual(before);
+    expect(before).toContain('src/api/user.ts');
+    expect(before).not.toContain('src/new-in-wt.ts');
+  });
+});
+
 describe('WebSocket', () => {
   it('rejects an upgrade from a foreign Origin', async () => {
     const { server } = await start({ watch: false });

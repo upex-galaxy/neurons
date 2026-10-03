@@ -319,7 +319,7 @@ let agentsDirty = false;
 /** Expands the collapsed dirs hiding the event's targets. True when one was expanded. */
 function revealTargets(event: VizEvent, now: number): boolean {
   let changed = false;
-  for (const p of eventTargets(event)) {
+  for (const p of eventTargets(event, model)) {
     for (const id of model.reveal(p, now)) {
       const n = model.get(id);
       if (n) view.refreshNode(n);

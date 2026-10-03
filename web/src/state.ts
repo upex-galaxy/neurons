@@ -14,6 +14,8 @@ export interface FeedItem {
   path: string;
   detail?: string;
   external?: boolean;
+  /** Claude Code worktree the path came from (VizEvent.worktree): `path` is the main-repo equivalent. */
+  worktree?: string;
 }
 
 export interface Filters {

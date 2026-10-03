@@ -61,6 +61,12 @@ export interface VizEvent {
   source: 'hook' | 'watcher';
   /** Disk change seen by the watcher outside any Claude tool window. */
   external?: boolean;
+  /**
+   * Name of the Claude Code worktree (`<root>/.claude/worktrees/<name>/`, made for a subagent
+   * with isolation "worktree") the paths came from. `paths`, `fromPaths` and `secondary` were
+   * rewritten to the equivalent paths in the main repo; the event never changes the tree.
+   */
+  worktree?: string;
 }
 
 export type NodeKind = 'dir' | 'file';

@@ -1,6 +1,7 @@
 // Event records kept in the page (no DOM): feed items, filters, counters and heat.
 // Pure so it can be unit tested in Node.
 import { FILE_ACTIONS, type Action, type VizEvent } from '../../src/shared/types.ts';
+import { WORKTREE_LABEL } from './labels.ts';
 import type { FeedItem, Filters } from './state.ts';
 import { normalizePath } from './treeModel.ts';
 
@@ -28,7 +29,20 @@ export function feedItem(event: VizEvent): FeedItem {
   if (event.agentType) item.agentType = event.agentType;
   if (event.detail) item.detail = event.detail;
   if (event.external) item.external = true;
+  if (event.worktree) item.worktree = event.worktree;
   return item;
+}
+
+/**
+ * The small tag shown next to a feed row's path when the event happened in a subagent
+ * worktree (the path is the main-repo equivalent), or undefined.
+ */
+export function pathTag(item: Pick<FeedItem, 'path' | 'worktree'>): { text: string; title: string } | undefined {
+  if (!item.worktree) return undefined;
+  return {
+    text: WORKTREE_LABEL,
+    title: `En el worktree .claude/worktrees/${item.worktree}/ de un subagente; la ruta es la equivalente del repo principal.`,
+  };
 }
 
 export function passes(item: Pick<FeedItem, 'sessionId' | 'agentId' | 'external'>, f: Filters): boolean {

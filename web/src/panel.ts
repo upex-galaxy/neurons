@@ -5,7 +5,7 @@ import { ACTION_LABELS, EXTRA_COUNTER_ACTIONS, FAIL_LABEL, LEGEND_ACTIONS, MAIN_
 import type { RendererKind } from './renderer.ts';
 import { sessionPalette } from './sessions.ts';
 import { FEED_LIMIT, type FeedItem, type Filters } from './state.ts';
-import { MAIN_AGENT } from './store.ts';
+import { MAIN_AGENT, pathTag } from './store.ts';
 
 export interface SessionRow {
   sessionId: string;
@@ -279,6 +279,15 @@ export class Panel {
     path.title = item.detail && item.path ? `${item.path}\n${item.detail}` : item.path || item.detail || '';
 
     li.append(time, chip, agent, sess, path);
+    const tag = pathTag(item);
+    if (tag) {
+      const wt = document.createElement('span');
+      wt.className = 'wt-tag';
+      wt.textContent = tag.text;
+      wt.title = tag.title;
+      path.classList.add('tagged');
+      li.append(wt);
+    }
     return li;
   }
 

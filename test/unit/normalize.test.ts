@@ -3,8 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Normalizer, bashDetail, parseHookPayload, type HookPayload } from '../../src/server/normalize.ts';
-import { createPathResolver } from '../../src/server/paths.ts';
+import { Normalizer, bashDetail, parseHookPayload, promptDetail, type HookPayload } from '../../src/server/normalize.ts';
+import { createPathResolver, splitWorktreeRel } from '../../src/server/paths.ts';
 import { TreeIndex, scanTree } from '../../src/server/tree.ts';
 import type { VizEvent } from '../../src/shared/types.ts';
 
@@ -454,6 +454,153 @@ describe('Normalizer: other rules', () => {
     const [e] = normalizer.normalize(ev({ hook_event_name: 'Stop', session_id: 'fresh' }));
     expect(e?.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(Math.abs((e?.ts ?? 0) - Date.now())).toBeLessThan(5000);
+  });
+});
+
+describe('Normalizer: Claude Code subagent worktrees', () => {
+  const WT = '.claude/worktrees/agent-af7ec553e0c4e91b1';
+  const ev = (e: Record<string, unknown>): HookPayload =>
+    ({ session_id: 's3', agent_id: 'af7ec553e0c4e91b1', agent_type: 'general-purpose', cwd: path.join(repo, WT), ...e }) as unknown as HookPayload;
+
+  it('splitWorktreeRel', () => {
+    expect(splitWorktreeRel(`${WT}/web/src/main.ts`)).toEqual({ worktree: 'agent-af7ec553e0c4e91b1', rel: 'web/src/main.ts' });
+    expect(splitWorktreeRel(WT)).toEqual({ worktree: 'agent-af7ec553e0c4e91b1', rel: '' });
+    expect(splitWorktreeRel(`${WT}/`)).toEqual({ worktree: 'agent-af7ec553e0c4e91b1', rel: '' });
+    expect(splitWorktreeRel('.claude/worktrees')).toBeUndefined();
+    expect(splitWorktreeRel('.claude/worktrees-old/x/a.ts')).toBeUndefined();
+    expect(splitWorktreeRel('src/.claude/worktrees/x/a.ts')).toBeUndefined();
+  });
+
+  it('rewrites a Read inside the worktree to the main-repo path and names the worktree', async () => {
+    const { normalizer } = await makeNormalizer();
+    const e = main(normalizer.normalize(ev({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_use_id: 'w1', tool_input: { file_path: path.join(repo, WT, 'src/api/user.ts') } })));
+    expect(e).toMatchObject({ action: 'read', paths: ['src/api/user.ts'], worktree: 'agent-af7ec553e0c4e91b1', agentId: 'af7ec553e0c4e91b1' });
+    expect(e.outsideRepo).toBeUndefined();
+  });
+
+  it('relative paths resolve against the worktree cwd; a Write of a new file stays a create', async () => {
+    const { normalizer } = await makeNormalizer({ fileExists: () => false });
+    const pre = main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Write', tool_use_id: 'w2', tool_input: { file_path: 'src/api/only-here.ts', content: 'x' } })));
+    expect(pre).toMatchObject({ action: 'create', phase: 'pre', paths: ['src/api/only-here.ts'], worktree: 'agent-af7ec553e0c4e91b1' });
+  });
+
+  it('a Bash in the worktree lights the root, and a Grep keeps hits that exist in the main tree', async () => {
+    const { normalizer } = await makeNormalizer();
+    const bash = main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'w3', tool_input: { command: 'npm test' } })));
+    expect(bash).toMatchObject({ action: 'bash', paths: [''], worktree: 'agent-af7ec553e0c4e91b1' });
+    const grep = main(
+      normalizer.normalize(
+        ev({
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Grep',
+          tool_use_id: 'w4',
+          tool_input: { pattern: 'TODO', path: path.join(repo, WT, 'src') },
+          tool_response: { filenames: [path.join(repo, WT, 'src/api/user.ts'), path.join(repo, WT, 'src/new.ts')] },
+        }),
+      ),
+    );
+    expect(grep).toMatchObject({ action: 'search', paths: ['src'], secondary: ['src/api/user.ts'], worktree: 'agent-af7ec553e0c4e91b1' });
+  });
+
+  it('the worktrees dir itself is dropped; main-repo paths carry no worktree', async () => {
+    const { normalizer } = await makeNormalizer();
+    const dir = main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_use_id: 'w5', tool_input: { file_path: path.join(repo, '.claude/worktrees') } })));
+    expect(dir.paths).toEqual([]);
+    expect(dir.worktree).toBeUndefined();
+    const plain = main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_use_id: 'w6', cwd: repo, tool_input: { file_path: 'src/api/user.ts' } })));
+    expect(plain.paths).toEqual(['src/api/user.ts']);
+    expect(plain.worktree).toBeUndefined();
+  });
+
+  it('a command that mixes main-repo and worktree paths tags each path by its own tree', async () => {
+    const { normalizer } = await makeNormalizer();
+    const run = (command: string, id: string, extra: Record<string, unknown> = {}): VizEvent[] =>
+      normalizer
+        .normalize({ session_id: 's5', cwd: repo, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: id, tool_input: { command }, ...extra } as unknown as HookPayload)
+        .filter((e) => e.action !== 'session_start');
+    const rm = run(`rm docs/old.md ${WT}/src/api/user.ts`, 'x1');
+    expect(rm).toHaveLength(2);
+    expect(rm[0]).toMatchObject({ action: 'delete', paths: ['docs/old.md'] });
+    expect(rm[0]?.worktree).toBeUndefined();
+    expect(rm[1]).toMatchObject({ action: 'delete', paths: ['src/api/user.ts'], worktree: 'agent-af7ec553e0c4e91b1' });
+
+    // Out of the worktree into the main repo: a delete there and a create here, never one move.
+    const mv = run(`mv ${WT}/src/api/user.ts src/api/moved.ts`, 'x2');
+    expect(mv).toHaveLength(2);
+    expect(mv[0]).toMatchObject({ action: 'create', paths: ['src/api/moved.ts'] });
+    expect(mv[0]?.worktree).toBeUndefined();
+    expect(mv[1]).toMatchObject({ action: 'delete', paths: ['src/api/user.ts'], worktree: 'agent-af7ec553e0c4e91b1' });
+    const same = run(`mv ${WT}/src/api/user.ts src/api/user.ts`, 'x3');
+    expect(same.map((e) => [e.action, e.paths, e.worktree])).toEqual([
+      ['create', ['src/api/user.ts'], undefined],
+      ['delete', ['src/api/user.ts'], 'agent-af7ec553e0c4e91b1'],
+    ]);
+
+    // Same move reported by bashEditDiff.
+    const post = normalizer
+      .normalize({
+        session_id: 's5',
+        cwd: repo,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_use_id: 'x4',
+        tool_input: { command: 'mv x y' },
+        tool_response: {
+          bashEditDiff: {
+            files: [
+              { filePath: path.join(repo, 'src/api/moved.ts'), created: true },
+              { filePath: path.join(repo, WT, 'src/api/user.ts'), deleted: true },
+            ],
+          },
+        },
+      } as unknown as HookPayload)
+      .filter((e) => e.action !== 'session_start');
+    expect(post.map((e) => [e.action, e.paths, e.worktree])).toEqual([
+      ['create', ['src/api/moved.ts'], undefined],
+      ['delete', ['src/api/user.ts'], 'agent-af7ec553e0c4e91b1'],
+    ]);
+  });
+
+  it('a git worktree outside the root stays outsideRepo', async () => {
+    const { normalizer } = await makeNormalizer();
+    const outside = path.join(os.tmpdir(), 'orca', 'workspaces', 'feature', 'src', 'api', 'user.ts');
+    const e = main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_use_id: 'w7', cwd: repo, tool_input: { file_path: outside } })));
+    expect(e.paths).toEqual([]);
+    expect(e.outsideRepo).toEqual([outside]);
+    expect(e.worktree).toBeUndefined();
+  });
+});
+
+describe('Normalizer: prompts injected by Claude Code', () => {
+  const ev = (e: Record<string, unknown>): HookPayload => ({ session_id: 's4', cwd: repo, ...e }) as unknown as HookPayload;
+
+  it('a <task-notification> prompt becomes a fixed label, never the raw tags', async () => {
+    const { normalizer } = await makeNormalizer();
+    const prompt =
+      '<task-notification>\n<task-id>af7ec553e0c4e91b1</task-id>\n<tool-use-id>toolu_01CoRroNzfR2WXWHd4Tp12Mw</tool-use-id>\n<output-file>/tmp/x</output-file>\n</task-notification>';
+    const e = main(normalizer.normalize(ev({ hook_event_name: 'UserPromptSubmit', prompt })));
+    expect(e).toMatchObject({ action: 'turn_start', detail: 'notificación de tarea en segundo plano' });
+    expect(JSON.stringify(e)).not.toContain('toolu_01CoRroNzfR2WXWHd4Tp12Mw');
+  });
+
+  it('promptDetail', () => {
+    expect(promptDetail('  <system-reminder>hola</system-reminder>')).toBe('notificación del sistema');
+    expect(promptDetail('<task-notification> <task-id>x</task-id>')).toBe('notificación de tarea en segundo plano');
+    expect(promptDetail('Arreglá <b>esto</b> y <a href="x">aquello</a>')).toBe('Arreglá esto y aquello');
+    expect(promptDetail('mirá esto <command-name>/foo</command-name>')).toBe('mirá esto /foo');
+    // Tags are stripped before truncating, so a trailing `<x` is something the user typed.
+    expect(promptDetail('cortado al final <out')).toBe('cortado al final <out');
+    expect(promptDetail('fijate a<b')).toBe('fijate a<b');
+    expect(promptDetail('si a<b y c>d')).toBe('si a<b y c>d');
+    // A typed prompt that opens with an HTML tag is not a Claude Code notification.
+    expect(promptDetail('<div> no se centra')).toBe('no se centra');
+    expect(promptDetail('<button type="submit"> no responde')).toBe('no responde');
+    expect(promptDetail('<command-message>init</command-message>')).toBe('notificación del sistema');
+    expect(promptDetail('si a < b y c > d')).toBe('si a < b y c > d');
+    expect(promptDetail('<Button> no anda')).toBe('no anda');
+    expect(promptDetail('<task-id>')).toBe('notificación del sistema');
+    expect(promptDetail('</x>')).toBeUndefined();
+    expect(promptDetail('x'.repeat(300))).toHaveLength(120);
   });
 });
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TreeSnapshot, VizEvent } from '../../src/shared/types.ts';
-import { playEvent, waitsForDelta, type EffectsContext } from '../src/effects.ts';
+import { eventTargets, playEvent, waitsForDelta, type EffectsContext } from '../src/effects.ts';
 import type { PulseOptions } from '../src/glow.ts';
 import type { Renderer } from '../src/renderer.ts';
 import { TreeModel } from '../src/treeModel.ts';
@@ -49,6 +49,26 @@ describe('waitsForDelta', () => {
     expect(waitsForDelta(event({ paths: ['src/api/user.ts'] }), model, [{ path: 'x.ts', kind: 'file' }])).toBe(false);
     expect(waitsForDelta(event({ paths: ['src/api/ghost.ts'] }), model, [])).toBe(false);
     expect(waitsForDelta(event({ paths: ['src/api/ghost.ts'] }), model, [{ path: 'other.ts', kind: 'file' }])).toBe(false);
+  });
+});
+
+describe('worktree events (paths rewritten from .claude/worktrees/<name>/)', () => {
+  const model = new TreeModel();
+  model.load(tree);
+
+  it('never wait for a tree delta: the server does not add their paths', () => {
+    const e = event({ action: 'create', paths: ['src/api/health.ts'], worktree: 'agent-x' });
+    expect(waitsForDelta(e, model, [{ path: 'src/api/health.ts', kind: 'file' }])).toBe(false);
+  });
+
+  it('reveal the deepest existing node when the path is not in the main tree', () => {
+    expect(model.existing('src/api/v2/only-here.ts')).toBe('src/api');
+    expect(model.existing('src/api/user.ts')).toBe('src/api/user.ts');
+    expect(model.existing('nope/x.ts')).toBe('');
+    const e = event({ action: 'create', paths: ['src/api/v2/only-here.ts', 'src/api/v2/other.ts'], worktree: 'agent-x' });
+    expect(eventTargets(e, model)).toEqual(['src/api']);
+    // Without the worktree mark the path is kept as is (a create waiting for its delta).
+    expect(eventTargets({ ...e, worktree: undefined } as VizEvent, model)).toEqual(['src/api/v2/only-here.ts', 'src/api/v2/other.ts']);
   });
 });
 
@@ -113,6 +133,23 @@ describe('playEvent timers', () => {
     vi.advanceTimersByTime(2000);
     expect(calls).toContain('particle:src/api->src/api/user.ts');
     expect(calls).toContain('pulse:src/api/user.ts');
+  });
+
+  it('a worktree event lights the equivalent main-repo node when it exists', () => {
+    const { ctx, calls } = setup();
+    playEvent(ctx, event({ action: 'edit', paths: ['src/api/user.ts'], worktree: 'agent-x', agentId: 'sub-1' }));
+    vi.advanceTimersByTime(2000);
+    expect(calls).toContain('particle:src/api->src/api/user.ts');
+    expect(calls).toContain('pulse:src/api/user.ts');
+  });
+
+  it('a worktree event on a file only the worktree has lights its deepest existing ancestor', () => {
+    const { ctx, calls } = setup();
+    playEvent(ctx, event({ action: 'create', paths: ['src/api/v2/only-here.ts'], worktree: 'agent-x' }));
+    vi.advanceTimersByTime(2000);
+    expect(calls).toContain('particle:src->src/api');
+    expect(calls).toContain('pulse:src/api');
+    expect(calls.some((c) => c.includes('only-here'))).toBe(false);
   });
 
   it('drops pending hops, pulses and flashes after a reset (replay seek, reconnect)', () => {

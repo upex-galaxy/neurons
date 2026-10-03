@@ -4,7 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { LEGACY_STATE_DIR_NAME, STATE_DIR_NAME, type NodeKind, type TreeEntry, type TreeSnapshot } from '../shared/types.ts';
-import { toPosix } from './paths.ts';
+import { isWorktreeRel, toPosix } from './paths.ts';
 
 export const DEFAULT_EXCLUDES = ['.git', 'node_modules', STATE_DIR_NAME, LEGACY_STATE_DIR_NAME, 'dist', 'build'];
 
@@ -22,9 +22,13 @@ export function isExcludedRel(rel: string): boolean {
   return segments(rel).some((s) => DEFAULT_EXCLUDES.includes(s));
 }
 
-/** True when any segment of `rel` is `.git`, `.neurons` or the legacy `.repo-synapse`. */
+/**
+ * True when any segment of `rel` is `.git`, `.neurons` or the legacy `.repo-synapse`, or
+ * when `rel` is under `.claude/worktrees/` (Claude Code's subagent worktrees: a full
+ * checkout of the repo, excluded whether or not .gitignore lists it).
+ */
 export function isAlwaysExcluded(rel: string): boolean {
-  return segments(rel).some((s) => ALWAYS_EXCLUDED.includes(s));
+  return segments(rel).some((s) => ALWAYS_EXCLUDED.includes(s)) || isWorktreeRel(toPosix(rel).replace(/^\.?\/+/, ''));
 }
 
 function comparePaths(a: string, b: string): number {
@@ -122,6 +126,7 @@ async function scanWalk(root: string, maxFiles: number): Promise<Collected> {
     for (const d of dirents) {
       if (DEFAULT_EXCLUDES.includes(d.name)) continue;
       const rel = relDir ? `${relDir}/${d.name}` : d.name;
+      if (isAlwaysExcluded(rel)) continue;
       if (d.isDirectory()) {
         entries.push({ path: rel, kind: 'dir' });
         queue.push(rel);
@@ -223,7 +228,8 @@ export class TreeIndex {
   /** Adds `rel` and any missing ancestors. Returns the new entries, parents first. */
   add(rel: string, kind: NodeKind): TreeEntry[] {
     rel = toPosix(rel).replace(/^\/+|\/+$/g, '');
-    if (rel === '' || this.#kinds.has(rel)) return [];
+    // A subagent worktree is a second checkout of the repo: it never enters the tree.
+    if (rel === '' || this.#kinds.has(rel) || isWorktreeRel(rel)) return [];
     const added: TreeEntry[] = [];
     const parts = rel.split('/');
     let parent = '';

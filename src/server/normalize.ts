@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Action, Phase, SessionInfo, VizEvent } from '../shared/types.ts';
 import { classifyBash, extractPathsFromOutput, type BashClassification } from './bash.ts';
-import { toPosix, type PathResolver } from './paths.ts';
+import { splitWorktreeRel, toPosix, type PathResolver, type ResolvedPath } from './paths.ts';
 import { isAlwaysExcluded, type TreeIndex } from './tree.ts';
 
 export interface HookPayload {
@@ -56,6 +56,28 @@ function obj(v: unknown): Record<string, unknown> | undefined {
 export function shortDetail(s: string): string {
   const line = s.replace(/\s+/g, ' ').trim();
   return line.length > DETAIL_MAX ? line.slice(0, DETAIL_MAX - 1) + '…' : line;
+}
+
+/**
+ * A prompt that opens with a hyphenated XML-like tag (`<task-notification>`,
+ * `<system-reminder>`, `<command-message>`) was written by Claude Code, not typed. Its tags
+ * always have a `-` or `_`; a typed prompt that opens with `<div>` or `<Button>` is not one.
+ */
+const INJECTED_PROMPT_RE = /^<([a-z][a-z0-9]*(?:[-_][a-z0-9]+)+)(?:\s[^<>]*)?>/;
+/** Whole tags only (`<x>`, `</x>`, `<x a="1">`, `<x/>`). `a<b` or `si a<b y c>d` is not a tag. */
+const TAG_FRAGMENT_RE = /<\/?[a-z][a-z0-9_-]*(?:\s+[\w:.-]+=(?:"[^"]*"|'[^']*'|[^\s"'<>]+))*\s*\/?>/gi;
+
+/**
+ * The turn_start detail for a UserPromptSubmit prompt. Claude Code also submits prompts of
+ * its own (`<task-notification>` when a background subagent finishes): those get a fixed
+ * label, never their raw text. A typed prompt keeps its first 120 chars without tags.
+ */
+export function promptDetail(prompt: string): string | undefined {
+  const trimmed = prompt.trim();
+  const injected = INJECTED_PROMPT_RE.exec(trimmed);
+  if (injected) return injected[1] === 'task-notification' ? 'notificación de tarea en segundo plano' : 'notificación del sistema';
+  const detail = shortDetail(trimmed.replace(TAG_FRAGMENT_RE, ' '));
+  return detail === '' ? undefined : detail;
 }
 
 // --- Bash command -> detail
@@ -143,6 +165,8 @@ function globBase(arg: string): string {
 interface Placed {
   paths: string[];
   outside: string[];
+  /** Set when a path was inside a Claude Code worktree (and rewritten to the main repo). */
+  worktree?: string;
 }
 
 type ToolPlan = {
@@ -152,6 +176,7 @@ type ToolPlan = {
   detail?: string | undefined;
   secondary?: string[];
   fromPaths?: string[];
+  worktree?: string | undefined;
 };
 
 export class Normalizer {
@@ -220,13 +245,14 @@ export class Normalizer {
             outside: placed.outside,
             detail: reason && shortDetail(reason),
             secondary: trigger,
+            worktree: placed.worktree,
           }),
         );
         break;
       }
       case 'UserPromptSubmit': {
         const prompt = str(p.prompt);
-        out.push(this.#event(p, ts, { action: 'turn_start', phase: 'info', paths: [], detail: prompt && shortDetail(prompt) }));
+        out.push(this.#event(p, ts, { action: 'turn_start', phase: 'info', paths: [], detail: prompt && promptDetail(prompt) }));
         break;
       }
       case 'Stop':
@@ -300,6 +326,7 @@ export class Normalizer {
         detail: denied ? 'denied' : plan.detail,
         secondary: plan.secondary,
         fromPaths: plan.fromPaths,
+        worktree: plan.worktree,
       });
       ev.toolName = base.toolName;
       if (base.toolUseId) ev.toolUseId = base.toolUseId;
@@ -328,10 +355,10 @@ export class Normalizer {
       }
       default: {
         const filePath = str(input.file_path);
-        const placed = filePath ? this.#place([filePath], cwd) : { paths: [], outside: [] };
+        let placed: Placed = filePath ? this.#place([filePath], cwd) : { paths: [], outside: [] };
         if (!filePath) {
           const generic = str(input.path);
-          if (generic) placed.paths = this.#place([generic], cwd).paths;
+          if (generic) placed = { ...this.#place([generic], cwd), outside: [] };
         }
         return [emit({ action: 'tool', ...placed })];
       }
@@ -404,13 +431,14 @@ export class Normalizer {
 
     if (cls.kind === 'search') {
       const args = cls.pathArgs.filter((a) => !a.includes('$') && !a.includes('`')).map(globBase);
-      const placed = args.length > 0 ? this.#place(args, cwd) : this.#cwdPlace(argBase);
-      const plan: ToolPlan = { action: 'search', ...placed, detail };
-      if (phase === 'post') {
+      const groups = args.length > 0 ? this.#placeGroups(args, cwd) : [this.#cwdPlace(argBase)];
+      const plans: ToolPlan[] = groups.map((g) => ({ action: 'search', ...g, detail }));
+      const first = plans[0];
+      if (phase === 'post' && first) {
         const stdout = typeof response?.stdout === 'string' ? response.stdout : '';
-        plan.secondary = this.#indexed(extractPathsFromOutput(stdout, SECONDARY_MAX), argBase);
+        first.secondary = this.#indexed(extractPathsFromOutput(stdout, SECONDARY_MAX), argBase);
       }
-      return [plan];
+      return plans;
     }
     if (cls.kind === 'delete' || cls.kind === 'move') {
       let plans = phase !== 'pre' && toolUseId ? this.#bashPlans.get(toolUseId) : undefined;
@@ -427,9 +455,9 @@ export class Normalizer {
       // Nothing certain to point at (globs, find -delete, rm -rf .): the watcher reports
       // the real removals, so the command is shown as plain Bash on the dirs it works in.
       const hints = cls.pathArgs.filter((a) => !isDynamic(a)).map(globBase);
-      const placed = hints.length > 0 ? this.#place(hints, cwd) : this.#cwdPlace(argBase);
-      if (placed.paths.length === 0 && placed.outside.length === 0) return [{ action: 'bash', ...this.#cwdPlace(argBase), detail }];
-      return [{ action: 'bash', ...placed, detail }];
+      const groups = hints.length > 0 ? this.#placeGroups(hints, cwd) : [this.#cwdPlace(argBase)];
+      if (groups.every((g) => g.paths.length === 0 && g.outside.length === 0)) return [{ action: 'bash', ...this.#cwdPlace(argBase), detail }];
+      return groups.map((g) => ({ action: 'bash', ...g, detail }));
     }
     return [{ action: 'bash', ...this.#cwdPlace(argBase), detail }];
   }
@@ -441,10 +469,12 @@ export class Normalizer {
   #deletePlans(cls: BashClassification, cwd: string | undefined): ToolPlan[] {
     const bases = new Set(cls.bases ?? []);
     const targets = cls.pathArgs.filter((a) => !isDynamic(a) && !GLOB_RE.test(a) && !bases.has(a));
-    const placed = this.#place(targets, cwd);
-    placed.paths = placed.paths.filter((p) => p !== '');
-    if (placed.paths.length === 0 && placed.outside.length === 0) return [];
-    return [{ action: 'delete', ...placed }];
+    const plans: ToolPlan[] = [];
+    for (const g of this.#placeGroups(targets, cwd)) {
+      g.paths = g.paths.filter((p) => p !== '');
+      if (g.paths.length > 0 || g.outside.length > 0) plans.push({ action: 'delete', ...g });
+    }
+    return plans;
   }
 
   /**
@@ -454,39 +484,66 @@ export class Normalizer {
    * create, and a move out of it a delete.
    */
   #movePlans(cls: BashClassification, cwd: string | undefined): ToolPlan[] {
-    const to: string[] = [];
-    const from: string[] = [];
-    const created: string[] = [];
-    const deleted: string[] = [];
+    // One bucket per tree: the main repo ('') and each worktree a path came from. A move
+    // across the boundary is a delete on one side and a create on the other.
+    interface Bucket {
+      to: string[];
+      from: string[];
+      created: string[];
+      createdFrom: string[];
+      deleted: string[];
+      deletedTo: string[];
+    }
+    const buckets = new Map<string, Bucket>();
+    const bucket = (wt: string | undefined): Bucket => {
+      const key = wt ?? '';
+      let b = buckets.get(key);
+      if (!b) {
+        b = { to: [], from: [], created: [], createdFrom: [], deleted: [], deletedTo: [] };
+        buckets.set(key, b);
+      }
+      return b;
+    };
+    bucket(undefined);
     const outside: string[] = [];
-    const createdFrom: string[] = [];
-    const deletedTo: string[] = [];
-    const inRepo = (r: { inside: boolean; rel?: string | undefined }): string | undefined =>
-      r.inside && r.rel !== undefined && r.rel !== '' && !isAlwaysExcluded(r.rel) ? r.rel : undefined;
+    const inRepo = (r: ResolvedPath): { rel: string; worktree?: string } | undefined => {
+      const m = this.#repoRel(r);
+      return m && m.rel !== '' ? m : undefined;
+    };
     const addOutside = (list: string[], r: { inside: boolean; abs: string }) => {
       const abs = toPosix(r.abs);
       if (!r.inside && !list.includes(abs)) list.push(abs);
     };
+    const addUnique = (list: string[], v: string) => {
+      if (!list.includes(v)) list.push(v);
+    };
     for (const m of cls.moves ?? []) {
       if (isDynamic(m.dest) || GLOB_RE.test(m.dest)) continue;
       const dest = this.#resolver.resolve(m.dest, cwd);
-      const into = m.intoDir || (dest.inside && dest.rel !== undefined && this.#index.kind(dest.rel) === 'dir');
+      const destRel = this.#repoRel(dest)?.rel;
+      const into = m.intoDir || (destRel !== undefined && this.#index.kind(destRel) === 'dir');
       for (const s of m.sources) {
         if (isDynamic(s) || GLOB_RE.test(s)) continue;
         const src = this.#resolver.resolve(s, cwd);
         const target = into ? this.#resolver.resolve(path.join(dest.abs, path.basename(src.abs))) : dest;
-        const fromRel = inRepo(src);
-        const toRel = inRepo(target);
-        if (fromRel !== undefined && toRel !== undefined) {
-          if (fromRel === toRel) continue;
-          to.push(toRel);
-          from.push(fromRel);
-        } else if (toRel !== undefined) {
-          if (!created.includes(toRel)) created.push(toRel);
-          addOutside(createdFrom, src);
-        } else if (fromRel !== undefined) {
-          if (!deleted.includes(fromRel)) deleted.push(fromRel);
-          addOutside(deletedTo, target);
+        const fromM = inRepo(src);
+        const toM = inRepo(target);
+        if (fromM && toM && fromM.worktree === toM.worktree) {
+          if (fromM.rel === toM.rel) continue;
+          const b = bucket(toM.worktree);
+          b.to.push(toM.rel);
+          b.from.push(fromM.rel);
+        } else if (fromM && toM) {
+          addUnique(bucket(fromM.worktree).deleted, fromM.rel);
+          addUnique(bucket(toM.worktree).created, toM.rel);
+        } else if (toM) {
+          const b = bucket(toM.worktree);
+          addUnique(b.created, toM.rel);
+          addOutside(b.createdFrom, src);
+        } else if (fromM) {
+          const b = bucket(fromM.worktree);
+          addUnique(b.deleted, fromM.rel);
+          addOutside(b.deletedTo, target);
         } else {
           addOutside(outside, src);
           addOutside(outside, target);
@@ -494,9 +551,14 @@ export class Normalizer {
       }
     }
     const plans: ToolPlan[] = [];
-    if (to.length > 0 || outside.length > 0) plans.push({ action: 'move', paths: to, fromPaths: from, outside });
-    if (created.length > 0) plans.push({ action: 'create', paths: created, outside: createdFrom });
-    if (deleted.length > 0) plans.push({ action: 'delete', paths: deleted, outside: deletedTo });
+    for (const [key, b] of buckets) {
+      const worktree = key === '' ? undefined : key;
+      const out = key === '' ? outside : [];
+      const tag = (pl: ToolPlan): ToolPlan => (worktree === undefined ? pl : { ...pl, worktree });
+      if (b.to.length > 0 || out.length > 0) plans.push(tag({ action: 'move', paths: b.to, fromPaths: b.from, outside: out }));
+      if (b.created.length > 0) plans.push(tag({ action: 'create', paths: b.created, outside: b.createdFrom }));
+      if (b.deleted.length > 0) plans.push(tag({ action: 'delete', paths: b.deleted, outside: b.deletedTo }));
+    }
     return plans;
   }
 
@@ -504,7 +566,13 @@ export class Normalizer {
     const created = files.filter((f) => f.created === true && str(f.filePath));
     const deleted = files.filter((f) => f.deleted === true && str(f.filePath));
     const plans: ToolPlan[] = [];
-    const isMove = created.length === 1 && deleted.length === 1;
+    let isMove = created.length === 1 && deleted.length === 1;
+    if (isMove) {
+      const to = this.#place([str(created[0]?.filePath)], cwd);
+      const from = this.#place([str(deleted[0]?.filePath)], cwd);
+      // Between a worktree and the main repo: a delete on one side and a create on the other.
+      isMove = to.worktree === from.worktree;
+    }
     if (isMove) {
       const to = this.#place([str(created[0]?.filePath)], cwd);
       const from = this.#place([str(deleted[0]?.filePath)], cwd);
@@ -514,6 +582,7 @@ export class Normalizer {
         fromPaths: from.paths,
         outside: [...to.outside, ...from.outside],
         detail,
+        worktree: to.worktree,
       });
     }
     for (const f of files) {
@@ -541,6 +610,7 @@ export class Normalizer {
       detail?: string | undefined;
       secondary?: string[] | undefined;
       fromPaths?: string[] | undefined;
+      worktree?: string | undefined;
     },
     withAgent = true,
   ): VizEvent {
@@ -565,31 +635,79 @@ export class Normalizer {
     if (f.secondary && f.secondary.length > 0) ev.secondary = f.secondary;
     if (f.fromPaths && f.fromPaths.length > 0) ev.fromPaths = f.fromPaths;
     if (f.detail) ev.detail = f.detail;
+    if (f.worktree) ev.worktree = f.worktree;
     return ev;
+  }
+
+  /**
+   * The repo-relative path of an inside path, or undefined when it is outside or excluded.
+   * A path in a Claude Code worktree (`.claude/worktrees/<name>/rest`) becomes `rest`, the
+   * same file in the main repo, and says which worktree it came from.
+   */
+  #repoRel(r: ResolvedPath): { rel: string; worktree?: string } | undefined {
+    if (!r.inside || r.rel === undefined) return undefined;
+    const wt = splitWorktreeRel(r.rel);
+    if (wt) return isAlwaysExcluded(wt.rel) ? undefined : { rel: wt.rel, worktree: wt.worktree };
+    return isAlwaysExcluded(r.rel) ? undefined : { rel: r.rel };
   }
 
   /** Resolves candidate paths: inside -> rel (excluded dropped), outside -> absolute posix. */
   #place(inputs: (string | undefined)[], cwd: string | undefined): Placed {
-    const paths: string[] = [];
+    const placed: Placed = { paths: [], outside: [] };
+    for (const input of inputs) {
+      if (!input) continue;
+      const r = this.#resolver.resolve(input, cwd);
+      if (r.inside) {
+        const m = this.#repoRel(r);
+        if (!m) continue;
+        if (!placed.paths.includes(m.rel)) placed.paths.push(m.rel);
+        if (m.worktree !== undefined) placed.worktree ??= m.worktree;
+      } else {
+        const abs = toPosix(r.abs);
+        if (!placed.outside.includes(abs)) placed.outside.push(abs);
+      }
+    }
+    return placed;
+  }
+
+  /**
+   * Like #place, split by tree: one Placed for the main repo and one per worktree, in order
+   * of first appearance (main first), so a command that mixes both never tags a main-repo
+   * path as a worktree one. Outside paths go with the first group. Never empty.
+   */
+  #placeGroups(inputs: (string | undefined)[], cwd: string | undefined): Placed[] {
+    const groups = new Map<string, Placed>();
     const outside: string[] = [];
     for (const input of inputs) {
       if (!input) continue;
       const r = this.#resolver.resolve(input, cwd);
-      if (r.inside && r.rel !== undefined) {
-        if (!isAlwaysExcluded(r.rel) && !paths.includes(r.rel)) paths.push(r.rel);
-      } else if (!r.inside) {
+      if (!r.inside) {
         const abs = toPosix(r.abs);
         if (!outside.includes(abs)) outside.push(abs);
+        continue;
       }
+      const m = this.#repoRel(r);
+      if (!m) continue;
+      const key = m.worktree ?? '';
+      let g = groups.get(key);
+      if (!g) {
+        g = m.worktree !== undefined ? { paths: [], outside: [], worktree: m.worktree } : { paths: [], outside: [] };
+        groups.set(key, g);
+      }
+      if (!g.paths.includes(m.rel)) g.paths.push(m.rel);
     }
-    return { paths, outside };
+    const list = [...groups.entries()].sort(([a], [b]) => (a === '' ? -1 : b === '' ? 1 : 0)).map(([, g]) => g);
+    const first = list[0];
+    if (first) first.outside = outside;
+    else list.push({ paths: [], outside });
+    return list;
   }
 
   /** The Bash/tool working directory as a target: rel when inside, nothing otherwise. */
   #cwdPlace(dir: string | undefined): Placed {
-    const r = this.#resolver.resolve('', dir);
-    if (r.inside && r.rel !== undefined && !isAlwaysExcluded(r.rel)) return { paths: [r.rel], outside: [] };
-    return { paths: [], outside: [] };
+    const m = this.#repoRel(this.#resolver.resolve('', dir));
+    if (!m) return { paths: [], outside: [] };
+    return m.worktree !== undefined ? { paths: [m.rel], outside: [], worktree: m.worktree } : { paths: [m.rel], outside: [] };
   }
 
   /** Resolves output paths against `base` and keeps those present in the tree index. */
@@ -597,11 +715,10 @@ export class Normalizer {
     const out: string[] = [];
     const seen = new Set<string>();
     for (const c of candidates) {
-      const r = this.#resolver.resolve(c, base);
-      if (!r.inside || r.rel === undefined || r.rel === '' || seen.has(r.rel)) continue;
-      if (isAlwaysExcluded(r.rel) || !this.#index.has(r.rel)) continue;
-      seen.add(r.rel);
-      out.push(r.rel);
+      const m = this.#repoRel(this.#resolver.resolve(c, base));
+      if (!m || m.rel === '' || seen.has(m.rel) || !this.#index.has(m.rel)) continue;
+      seen.add(m.rel);
+      out.push(m.rel);
       if (out.length >= SECONDARY_MAX) break;
     }
     return out;

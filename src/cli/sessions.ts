@@ -1,6 +1,7 @@
-// Finds Claude Code sessions already running in a repo, so `start` can warn that they
-// may not pick up the hooks it just installed. Read-only: these processes are never
-// signaled. Every failure (no ps, no lsof, no /proc) means "unknown", never an error.
+// Finds Claude Code sessions already running in a repo, so `start` can say they pick up
+// the hooks it just installed (verified live on 2.1.288; older versions may need a
+// restart). Read-only: these processes are never signaled. Every failure (no ps, no
+// lsof, no /proc) means "unknown", never an error.
 //
 // macOS: `ps -axo pid=,ppid=,args=` picks the candidates and
 // `lsof -nP -a -p <pids> -d cwd -Fpn` gives their cwd. `lsof -c claude` alone is not
@@ -226,6 +227,16 @@ export async function findClaudeSessions(
   return undefined;
 }
 
+/** Claude Code version on which open sessions were seen picking up the hooks live (I9). */
+export const LIVE_HOOKS_VERIFIED_VERSION = '2.1.288';
+
+/** Fallback for Claude Code versions that only read the hooks when a session starts. */
+function restartFallback(plural: boolean): string {
+  return plural
+    ? 'Si con una versión anterior no ves eventos, reinicialas: /exit y después claude --continue en cada una.'
+    : 'Si con una versión anterior no ves eventos, reiniciala: /exit y después claude --continue.';
+}
+
 /** Spanish lines for `start` about the sessions found (empty when there are none). */
 export function sessionWarning(sessions: SessionProc[]): string[] {
   const n = sessions.length;
@@ -237,7 +248,23 @@ export function sessionWarning(sessions: SessionProc[]): string[] {
   return [
     head,
     n === 1
-      ? 'Puede que no lea los hooks recién instalados: si no ves eventos de esa sesión, reiniciala (/exit y después claude --continue).'
-      : 'Puede que no lean los hooks recién instalados: si no ves eventos de alguna, reiniciala (/exit y después claude --continue).',
+      ? `Toma los hooks en vivo, sin reiniciar (verificado con Claude Code ${LIVE_HOOKS_VERIFIED_VERSION}).`
+      : `Toman los hooks en vivo, sin reiniciar (verificado con Claude Code ${LIVE_HOOKS_VERIFIED_VERSION}).`,
+    restartFallback(n > 1),
   ];
+}
+
+/**
+ * What `start` says about Claude Code once the hooks are installed: the sessions found,
+ * an invitation to open one, or (detection failed) both cases in one line.
+ */
+export function startHint(sessions: SessionProc[] | undefined): string[] {
+  if (sessions === undefined) {
+    return [
+      `Abrí Claude Code en este repositorio. Una sesión que ya estaba abierta toma los hooks en vivo (verificado con Claude Code ${LIVE_HOOKS_VERIFIED_VERSION}).`,
+      restartFallback(false),
+    ];
+  }
+  if (sessions.length === 0) return ['Abrí Claude Code en este repositorio.'];
+  return sessionWarning(sessions);
 }
