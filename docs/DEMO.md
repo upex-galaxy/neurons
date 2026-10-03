@@ -1,6 +1,6 @@
 # Guion de demo
 
-Probado el 2026-09-30 con Claude Code 2.1.285 en macOS, sobre el repo que genera `scripts/make-demo-repo.sh`. Los tiempos y conteos de abajo son de esa corrida.
+Probado el 2026-09-30 con Claude Code 2.1.285 en macOS (todavía con el nombre `repo-synapse`; los comandos de abajo ya usan `neu`), sobre el repo que genera `scripts/make-demo-repo.sh`. Los tiempos y conteos de abajo son de esa corrida.
 
 ## 1. Instalar, iniciar y abrir la vista
 
@@ -9,29 +9,32 @@ Desde este repo, una sola vez:
 ```bash
 npm install
 npm run build
-npm link            # deja el comando global `repo-synapse`
+npm link            # deja los comandos globales `neu` y `neurons`
 ```
+
+Si antes enlazaste la versión vieja (`repo-synapse`), corré `npm unlink -g repo-synapse` antes del `npm link`: si no, falla con `EEXIST` porque el paquete viejo es dueño de `neu`. El README explica el resto de la migración.
 
 Crear el repo de ejemplo (14 archivos, con `CLAUDE.md`, `src/CLAUDE.md` y una regla en `.claude/rules/api.md`):
 
 ```bash
-scripts/make-demo-repo.sh ~/repo-synapse-demo
+scripts/make-demo-repo.sh ~/neurons-demo
 ```
 
 Levantar el visor sobre ese repo. Abre el navegador en `http://127.0.0.1:7777`:
 
 ```bash
-repo-synapse start ~/repo-synapse-demo
+cd ~/neurons-demo
+neu                 # igual que `neu start ~/neurons-demo`
 ```
 
 En otra terminal, abrir Claude Code **después** de arrancar el visor:
 
 ```bash
-cd ~/repo-synapse-demo
+cd ~/neurons-demo
 claude
 ```
 
-El orden importa: `start` escribe los hooks en `.claude/settings.local.json` y Claude Code los lee al iniciar la sesión. Si Claude ya estaba abierto, reinicialo.
+El orden importa: `start` escribe los hooks en `.claude/settings.local.json` y Claude Code los lee al iniciar la sesión. Si Claude ya estaba abierto en el repo, `start` lo detecta y avisa con su PID: reinicialo con `/exit` y después `claude --continue`.
 
 ## 2. Prompt de demo
 
@@ -63,20 +66,20 @@ Respondé corto al final.
 | Paso 6 (subagente) | Las lecturas del subagente llevan un halo de otro color alrededor del nodo | `subagente`, lecturas con el tipo `general-purpose` en la columna agente, y `fin de subagente`. El filtro de agente ya lo lista |
 | Fin | Los nodos más tocados quedan con brillo residual (heatmap) | `fin de turno` |
 
-Para ver un cambio externo, borrá un archivo desde otra terminal mientras el visor corre (`rm ~/repo-synapse-demo/docs/arquitectura.md`). Sale en gris como `borrado ext.` y desaparece si destildás "Mostrar cambios externos".
+Para ver un cambio externo, borrá un archivo desde otra terminal mientras el visor corre (`rm ~/neurons-demo/docs/arquitectura.md`). Sale en gris como `borrado ext.` y desaparece si destildás "Mostrar cambios externos".
 
 En la corrida de prueba la latencia entre el POST del hook y el mensaje por WebSocket fue de 0 a 5 ms, y la página marcó entre 1 y 4 ms entre la llegada del evento y el primer destello, a 60 fps.
 
 ## 4. Replay
 
-Cada evento queda en `~/repo-synapse-demo/.repo-synapse/events.jsonl` (solo rutas y metadatos). Para reproducir la sesión:
+Cada evento queda en `~/neurons-demo/.neurons/events.jsonl` (solo rutas y metadatos). Para reproducir la sesión:
 
 ```bash
-repo-synapse replay ~/repo-synapse-demo
+neu replay ~/neurons-demo
 ```
 
 Tiene play, pausa, reiniciar y velocidades 1x, 2x y 5x. Los silencios de más de 3 s se comprimen a 3 s. También podés usar el botón "Reproducir log" en la vista en vivo.
 
 ## 5. Cerrar
 
-`Ctrl+C` en la terminal de `start`. Quita los hooks de `.claude/settings.local.json` (si el archivo no existía, lo borra) y devuelve `bashEditDiffEnabled` a su valor anterior en `~/.claude/settings.json`. Con el visor cerrado, Claude Code no ve ningún hook de repo-synapse y no muestra errores.
+`Ctrl+C` en la terminal de `start`, o `neu stop ~/neurons-demo` desde cualquier otra (`neu ls` muestra qué visores corren). Al cerrar, el visor quita los hooks de `.claude/settings.local.json` (si el archivo no existía, lo borra) y devuelve `bashEditDiffEnabled` a su valor anterior en `~/.claude/settings.json`. Con el visor cerrado, Claude Code no ve ningún hook de Neurons y no muestra errores.

@@ -1,5 +1,7 @@
 # repo-synapse: plan de implementación
 
+> El 2026-10-03 el producto pasó a llamarse **Neurons** (comando `neu`). Este plan quedó como se escribió, con los nombres de entonces: `repo-synapse` es hoy `neu`, `.repo-synapse/` es `.neurons/` y `?src=repo-synapse` es `?src=neurons`. El cambio y la compatibilidad con lo viejo están en `DECISIONS.md` (I28).
+
 Plan definitivo, escrito antes de implementar. Parte del documento de idea original y lo corrige con lo verificado contra la documentación oficial (`code.claude.com/docs/en/hooks`, `hooks-guide`, `settings`) y contra el binario instalado (`claude 2.1.285`, macOS arm64). Las decisiones y sus motivos están en `DECISIONS.md`.
 
 ## 1. Qué construimos

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Arquitectura de repo-synapse</title>
+  <title>Arquitectura de Neurons</title>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -342,9 +342,9 @@
 <div class="container">
 
   <header class="header">
-    <p class="header-eyebrow">repo-synapse · arquitectura</p>
+    <p class="header-eyebrow">Neurons · arquitectura</p>
     <h1>Cómo se enciende la red</h1>
-    <p class="subtitle">repo-synapse es un comando de terminal. Levanta un servidor en tu máquina, le pide a Claude Code que le avise de cada cosa que hace y dibuja tu repositorio como una red de nodos que se ilumina en vivo. Este documento muestra cómo encajan las piezas.</p>
+    <p class="subtitle">Neurons es un comando de terminal (<code>neu</code>). Levanta un servidor en tu máquina, le pide a Claude Code que le avise de cada cosa que hace y dibuja tu repositorio como una red de nodos que se ilumina en vivo. Este documento muestra cómo encajan las piezas.</p>
     <nav class="toc" aria-label="Índice">
       <a href="#vision">1 · Vista general</a>
       <a href="#ciclo">2 · Qué pasa al correr start</a>
@@ -365,8 +365,8 @@
     </div>
         <figure class="diagram" data-motion-root style="--motion-total:5400ms" data-motion-mode="reveal" data-step-count="6" data-step-current="6" data-frame="static" data-static-frame="complete">
       <div class="diagram-container" tabindex="0" role="group" aria-label="Diagrama: ←/→ cambia de paso, Espacio reproduce o pausa"><svg viewBox="0 0 960 384" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="vision-title vision-desc">
-        <title id="vision-title">Vista general de repo-synapse</title>
-        <desc id="vision-desc">Claude Code avisa cada herramienta al servidor local de repo-synapse con un POST /hook y recibe un 204 vacío; un watcher del sistema de archivos reporta los cambios de disco al mismo servidor, que normaliza cada aviso, lo agrega a events.jsonl y lo envía por WebSocket al navegador, donde la red 3D del repositorio se ilumina.</desc>
+        <title id="vision-title">Vista general de Neurons</title>
+        <desc id="vision-desc">Claude Code avisa cada herramienta al servidor local de Neurons con un POST /hook y recibe un 204 vacío; un watcher del sistema de archivos reporta los cambios de disco al mismo servidor, que normaliza cada aviso, lo agrega a events.jsonl y lo envía por WebSocket al navegador, donde la red 3D del repositorio se ilumina.</desc>
         <defs>
           <marker id="vision-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
           <marker id="vision-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
@@ -409,7 +409,7 @@
           <rect x="512" y="48" width="176" height="96" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
           <rect x="520" y="54" width="32" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
           <text x="536" y="63" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LOCAL</text>
-          <text x="600" y="92" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Servidor repo-synapse</text>
+          <text x="600" y="92" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Servidor Neurons</text>
           <text x="600" y="108" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">127.0.0.1:7777</text>
           <text x="600" y="124" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Normalizador · VizEvent</text>
         </g>
@@ -538,8 +538,8 @@
     </div>
     <figure class="diagram" data-motion-root style="--motion-total:7200ms" data-motion-mode="reveal" data-step-count="8" data-step-current="8" data-frame="static" data-static-frame="complete">
   <div class="diagram-container" tabindex="0" role="group" aria-label="Diagrama: ←/→ cambia de paso, Espacio reproduce o pausa"><svg viewBox="0 0 960 872" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ciclo-title ciclo-desc">
-    <title id="ciclo-title">Qué pasa al correr repo-synapse start</title>
-    <desc id="ciclo-desc">Diagrama de secuencia: repo-synapse start escanea el repo, levanta el servidor, escribe 14 hooks HTTP en settings.local.json y abre el navegador; después abrís claude, que lee esos hooks al iniciar y durante la sesión hace un POST /hook por cada herramienta, recibe 204 vacío y el evento llega al navegador por WebSocket; con Ctrl+C la CLI quita los hooks y revierte lo que cambió en la configuración de Claude.</desc>
+    <title id="ciclo-title">Qué pasa al correr neu start</title>
+    <desc id="ciclo-desc">Diagrama de secuencia: neu start escanea el repo, levanta el servidor, escribe 14 hooks HTTP en settings.local.json y abre el navegador; después abrís claude, que lee esos hooks al iniciar y durante la sesión hace un POST /hook por cada herramienta, recibe 204 vacío y el evento llega al navegador por WebSocket; con Ctrl+C la CLI quita los hooks y revierte lo que cambió en la configuración de Claude.</desc>
     <defs>
       <marker id="ciclo-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
         <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
@@ -565,13 +565,13 @@
     <line x1="840" y1="120" x2="840" y2="776" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
 
     <!-- Paso 1: Tú → CLI -->
-    <g data-motion-item data-step="1" aria-label="Ejecutás repo-synapse start en una terminal">
+    <g data-motion-item data-step="1" aria-label="Ejecutás neu start en una terminal">
       <rect x="296" y="156" width="8" height="192" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
       <line x1="120" y1="160" x2="296" y2="160" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#ciclo-arrow)"/>
       <rect x="188" y="140" width="44" height="12" rx="2" fill="#f5f5f5"/>
       <text x="210" y="149" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">START</text>
-      <rect x="160" y="168" width="100" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="210" y="177" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">repo-synapse start</text>
+      <rect x="180" y="168" width="60" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="210" y="177" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">neu start</text>
     </g>
 
     <!-- Paso 2: CLI self-message -->
@@ -672,7 +672,7 @@
     <rect x="220" y="40" width="160" height="80" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
     <rect x="228" y="48" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
     <text x="242" y="57" fill="rgba(45,49,66,0.80)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CLI</text>
-    <text x="300" y="88" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">CLI repo-synapse</text>
+    <text x="300" y="88" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">CLI Neurons</text>
     <text x="300" y="104" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">http + ws · 127.0.0.1</text>
 
     <rect x="400" y="40" width="160" height="80" rx="6" fill="#f5f5f5"/>
@@ -723,10 +723,10 @@
   </div>
   <p class="sr-only" data-motion-status role="status" aria-live="polite" aria-atomic="true"></p>
   <noscript><p>La animación necesita JavaScript. Arriba se ve el diagrama completo.</p></noscript>
-  <figcaption>Los hooks existen solo mientras corre <code>start</code>: se escriben al arrancar en <code>.claude/settings.local.json</code> (y <code>bashEditDiffEnabled</code> en <code>~/.claude/settings.json</code>), Claude los lee al abrir la sesión y Ctrl+C los quita. El servidor usa el puerto 7777 por defecto, o el siguiente libre.</figcaption>
+  <figcaption>Los hooks existen solo mientras corre <code>start</code>: se escriben al arrancar en <code>.claude/settings.local.json</code> (y <code>bashEditDiffEnabled</code> en <code>~/.claude/settings.json</code>), Claude los lee al abrir la sesión y Ctrl+C (o <code>neu stop</code>) los quita. El servidor usa el puerto 7777 por defecto, o el siguiente libre.</figcaption>
 </figure>
     <pre class="cmd"><span class="c"># terminal 1</span>
-repo-synapse start ~/mi-repo
+cd ~/mi-repo &amp;&amp; neu
 <span class="c"># terminal 2, después de arrancar el visor</span>
 cd ~/mi-repo &amp;&amp; claude
 <span class="c"># al terminar: Ctrl+C en la terminal 1</span></pre>
@@ -1242,25 +1242,26 @@ cd ~/mi-repo &amp;&amp; claude
     <div class="chapter-head">
       <p class="eyebrow">Capítulo 6 · Huella</p>
       <h2>Qué toca en tu máquina</h2>
-      <p>Lo que <code>start</code> cambia en la configuración de Claude (<code>settings.local.json</code> y <code>bashEditDiffEnabled</code>) tiene backup y se revierte al cerrar; si no hubo otros cambios, esos archivos quedan idénticos byte a byte. <code>.git/info/exclude</code> y <code>.repo-synapse/events.jsonl</code> quedan a propósito.</p>
+      <p>Lo que <code>start</code> cambia en la configuración de Claude (<code>settings.local.json</code> y <code>bashEditDiffEnabled</code>) tiene backup y se revierte al cerrar; si no hubo otros cambios, esos archivos quedan idénticos byte a byte. <code>.git/info/exclude</code> y <code>.neurons/events.jsonl</code> quedan a propósito.</p>
     </div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Archivo</th><th>Qué hace <code>start</code></th><th>Al cerrar</th></tr></thead>
         <tbody>
-          <tr><td><code>&lt;repo&gt;/.claude/settings.local.json</code></td><td>Agrega 14 hooks HTTP a <code>http://127.0.0.1:&lt;puerto&gt;/hook?src=repo-synapse</code>, con <code>timeout: 2</code>. Respeta los hooks que ya tenías</td><td>Quita solo sus entradas. Si el archivo no existía, lo borra</td></tr>
+          <tr><td><code>&lt;repo&gt;/.claude/settings.local.json</code></td><td>Agrega 14 hooks HTTP a <code>http://127.0.0.1:&lt;puerto&gt;/hook?src=neurons</code>, con <code>timeout: 2</code>. Respeta los hooks que ya tenías</td><td>Quita solo sus entradas. Si el archivo no existía, lo borra</td></tr>
           <tr><td><code>~/.claude/settings.json</code></td><td>Activa <code>bashEditDiffEnabled</code> si estaba apagado. No lo toca con <code>--no-bash-diff</code> ni con <code>--no-install</code>, y no crea el archivo si no existe o no es JSON válido. Respeta <code>$CLAUDE_CONFIG_DIR</code></td><td>Lo devuelve a su valor anterior cuando cierra el último visor</td></tr>
-          <tr><td><code>~/.claude/repo-synapse/</code></td><td>Backup de <code>settings.json</code> y registro de los visores que usan <code>bashEditDiffEnabled</code> (modo 0600)</td><td>Se borra al revertir la clave</td></tr>
-          <tr><td><code>&lt;repo&gt;/.repo-synapse/</code></td><td>Log <code>events.jsonl</code> (se agrega a lo que ya había), lock, manifiesto de instalación y backup <code>settings.local.json.bak</code></td><td>Queda el log, para el replay; el backup se borra al desinstalar</td></tr>
-          <tr><td><code>&lt;repo&gt;/.git/info/exclude</code></td><td>Agrega <code>/.claude/settings.local.json</code> y <code>/.repo-synapse/</code> si git no los ignoraba (en cada <code>start</code>, también con <code>--no-install</code>)</td><td>Queda; no se versiona y evita ruido en <code>git status</code></td></tr>
+          <tr><td><code>~/.claude/neurons/</code></td><td>Backup de <code>settings.json</code> y registro de los visores que usan <code>bashEditDiffEnabled</code> (modo 0600)</td><td>Se borra al revertir la clave</td></tr>
+          <tr><td><code>&lt;repo&gt;/.neurons/</code></td><td>Log <code>events.jsonl</code> (se agrega a lo que ya había), lock, manifiesto de instalación y backup <code>settings.local.json.bak</code></td><td>Queda el log, para el replay; el backup se borra al desinstalar</td></tr>
+          <tr><td><code>&lt;repo&gt;/.git/info/exclude</code></td><td>Agrega <code>/.claude/settings.local.json</code> y <code>/.neurons/</code> si git no los ignoraba (en cada <code>start</code>, también con <code>--no-install</code>)</td><td>Queda; no se versiona y evita ruido en <code>git status</code></td></tr>
+          <tr><td><code>~/.neurons/viewers/&lt;pid&gt;.json</code></td><td>Anota el visor (repo, puerto, URL, PID) para que <code>neu ls</code>, <code>neu open</code> y <code>neu stop</code> lo encuentren. Respeta <code>$NEURONS_HOME</code></td><td>Se borra</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="margin-top:1.25rem">Si el proceso muere de golpe, <code>repo-synapse uninstall &lt;repo&gt;</code> deshace la instalación, y el próximo <code>start</code> limpia por sí solo lo que haya quedado.</p>
+    <p style="margin-top:1.25rem">Si el proceso muere de golpe, <code>neu uninstall &lt;repo&gt;</code> deshace la instalación, y el próximo <code>start</code> limpia por sí solo lo que haya quedado.</p>
   </section>
 
   <footer class="footer">
-    <span>repo-synapse 0.1.0 · arquitectura</span>
+    <span>Neurons 0.2.0 · arquitectura</span>
     <span>Claude Code 2.1.285 · macOS</span>
   </footer>
 
