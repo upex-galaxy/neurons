@@ -58,7 +58,9 @@ La guía paso a paso con un repo de ejemplo y un prompt para probar está en [do
 
 Cada repo tiene su propio visor, en su propio puerto: `neu` en un repo y `neu` en otro dan dos procesos, el segundo en 7778. `neu ls` muestra cuáles corren y `neu stop --all` los cierra todos. Dos visores sobre el mismo repo no pueden convivir; el segundo se niega a arrancar y te pide cerrar el primero.
 
-Al arrancar, `start` busca sesiones de Claude Code que ya estén abiertas en el repo (con `ps` y `lsof` en macOS, `/proc` en Linux). Si encuentra alguna, avisa con su PID: esa sesión puede no leer los hooks recién instalados, y si no ves sus eventos hay que reiniciarla (`/exit` y después `claude --continue`). Si no encuentra ninguna, te pide que abras Claude Code. Si no puede saberlo, muestra el aviso genérico de antes.
+Al arrancar, `start` busca sesiones de Claude Code que ya estén abiertas en el repo (con `ps` y `lsof` en macOS, `/proc` en Linux) y las nombra con su PID. No hace falta reiniciarlas: una sesión abierta toma los hooks en vivo, y al cerrar el visor los suelta sin ningún `hook error` (verificado con Claude Code 2.1.288). Solo si usás una versión anterior y no ves eventos de esa sesión, reiniciala con `/exit` y después `claude --continue`. Si no encuentra ninguna sesión, te pide que abras Claude Code.
+
+Los subagentes que Claude Code lanza con aislamiento `worktree` trabajan en un checkout aparte, en `<repo>/.claude/worktrees/agent-<id>/`. Ese checkout nunca entra a la red, aunque tu `.gitignore` no lo ignore: lo que el subagente lee o edita ahí se ve sobre el archivo equivalente del repo principal (o sobre su carpeta más cercana, si el archivo solo existe en el worktree), y la fila del feed lleva la etiqueta `worktree`.
 
 Varias sesiones sobre el mismo repo se ven en la misma red. Con dos o más sesiones activas, cada una recibe un tono suave propio: un anillo fino alrededor de los nodos que toca, un borde del mismo color en sus filas del feed y un chip en la línea "Sesiones" del panel que filtra por ella. Una sesión cuenta como activa mientras no terminó, o durante los 10 minutos siguientes a su último evento. Un `/clear` no cuenta como sesión nueva: la que se limpió deja de contar en el acto, porque la ventana sigue con la otra. Con una sola sesión la vista queda igual que siempre. Los subagentes conservan su halo propio y los cambios externos su gris, sin anillo de sesión.
 
@@ -148,6 +150,6 @@ La primera vez, Playwright necesita `npx playwright install chromium`.
 ## Limitaciones conocidas
 
 - Solo se probó en macOS. En Linux `fs.watch` recursivo usa inotify y no está verificado.
-- Una sesión de Claude Code abierta antes que el visor puede no tomar los hooks sin reiniciar. `start` avisa cuando detecta una.
+- Que una sesión ya abierta tome los hooks sin reiniciar se verificó con Claude Code 2.1.288; con versiones anteriores puede hacer falta `/exit` y `claude --continue`.
 - Sin `bashEditDiff`, la atribución de `rm` y `mv` depende de ventanas de tiempo y del watcher; un `rm x; cp -p y z` puede mostrarse como un movimiento.
 - Las sesiones de Claude Code en la web o en la nube no llegan a un servidor local.

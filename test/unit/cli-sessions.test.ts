@@ -12,6 +12,7 @@ import {
   processTree,
   sessionsInRepo,
   sessionWarning,
+  startHint,
   type CommandRunner,
 } from '../../src/cli/sessions.ts';
 
@@ -189,12 +190,30 @@ describe('sessionWarning', () => {
     expect(sessionWarning([])).toEqual([]);
     const one = sessionWarning([{ pid: 7, cwd: '/r' }]).join('\n');
     expect(one).toContain('Hay 1 sesión de Claude Code abierta en este repositorio (PID 7).');
-    expect(one).toContain('si no ves eventos de esa sesión, reiniciala (/exit y después claude --continue)');
+    // Verified with Claude Code 2.1.288: an open session picks up the hooks live.
+    expect(one).toContain('Toma los hooks en vivo, sin reiniciar (verificado con Claude Code 2.1.288).');
+    expect(one).toContain('Si con una versión anterior no ves eventos, reiniciala: /exit y después claude --continue.');
+    expect(one).not.toContain('Puede que no lea');
     const two = sessionWarning([
       { pid: 7, cwd: '/r' },
       { pid: 9, cwd: '/r/a' },
     ]).join('\n');
     expect(two).toContain('Hay 2 sesiones de Claude Code abiertas en este repositorio (PID 7, 9).');
+    expect(two).toContain('Toman los hooks en vivo, sin reiniciar');
+    expect(two).toContain('Si con una versión anterior no ves eventos, reinicialas: /exit y después claude --continue en cada una.');
+    expect(two).not.toContain('reiniciala:');
     expect(two).not.toMatch(/[\u2013\u2014]/);
+  });
+});
+
+describe('startHint', () => {
+  it('says open sessions pick up the hooks live and keeps the restart only as a fallback', () => {
+    expect(startHint([])).toEqual(['Abrí Claude Code en este repositorio.']);
+    expect(startHint([{ pid: 7, cwd: '/r' }])).toEqual(sessionWarning([{ pid: 7, cwd: '/r' }]));
+    const unknown = startHint(undefined).join('\n');
+    expect(unknown).toContain('Abrí Claude Code en este repositorio.');
+    expect(unknown).toContain('toma los hooks en vivo (verificado con Claude Code 2.1.288)');
+    expect(unknown).toContain('Si con una versión anterior no ves eventos, reiniciala');
+    expect(unknown).not.toMatch(/[\u2013\u2014]/);
   });
 });

@@ -27,14 +27,16 @@ cd ~/neurons-demo
 neu                 # igual que `neu start ~/neurons-demo`
 ```
 
-En otra terminal, abrir Claude Code **después** de arrancar el visor:
+En otra terminal, abrir Claude Code:
 
 ```bash
 cd ~/neurons-demo
 claude
 ```
 
-El orden importa: `start` escribe los hooks en `.claude/settings.local.json` y Claude Code los lee al iniciar la sesión. Si Claude ya estaba abierto en el repo, `start` lo detecta y avisa con su PID: reinicialo con `/exit` y después `claude --continue`.
+`start` escribe los hooks en `.claude/settings.local.json`. Si Claude ya estaba abierto en el repo, `start` lo detecta y lo nombra con su PID, y no hace falta reiniciarlo: la sesión toma los hooks en vivo (verificado con Claude Code 2.1.288). Con una versión anterior, si no aparecen eventos, salí con `/exit` y volvé con `claude --continue`.
+
+Si el prompt lanza un subagente con aislamiento `worktree`, Claude Code hace un checkout aparte en `.claude/worktrees/agent-<id>/`. No aparece como archivos nuevos en la red: lo que toca el subagente se enciende sobre el archivo equivalente del repo, con la etiqueta `worktree` en el feed.
 
 ## 2. Prompt de demo
 
