@@ -59,10 +59,10 @@ describe('createPathResolver', () => {
     expect(r.resolve('/etc/hosts').rel).toBeUndefined();
   });
 
-  it('keeps .git and .repo-synapse paths inside (filtering happens elsewhere)', () => {
+  it('keeps .git and .neurons paths inside (filtering happens elsewhere)', () => {
     const r = createPathResolver(mk(os.tmpdir()));
     expect(r.resolve('.git/HEAD')).toMatchObject({ rel: '.git/HEAD', inside: true });
-    expect(r.resolve('.repo-synapse/events.jsonl')).toMatchObject({ rel: '.repo-synapse/events.jsonl', inside: true });
+    expect(r.resolve('.neurons/events.jsonl')).toMatchObject({ rel: '.neurons/events.jsonl', inside: true });
   });
 
   it('expands ~ against the home directory', () => {

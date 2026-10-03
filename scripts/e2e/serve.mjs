@@ -42,7 +42,8 @@ if (mode === 'perf') makePerfRepo(repo, 2000);
 else makeProbeRepo(repo);
 const realRepo = fs.realpathSync(repo);
 
-const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir, REPO_SYNAPSE_DEBUG: '1' };
+// NEURONS_HOME too: `start` registers itself there (never in the real ~/.neurons).
+const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir, NEURONS_HOME: path.join(base, 'neurons-home'), NEURONS_DEBUG: '1' };
 
 /** @type {import('node:child_process').ChildProcess | undefined} */
 let child;
@@ -84,7 +85,7 @@ async function recordLog() {
   const c = runCli(['start', realRepo, '--no-open', '--no-install', '--no-bash-diff', '--strict-port', '--port', String(recPort)]);
   await waitHealth(recPort);
   for (const body of fixturePayloads('run1.jsonl', realRepo, path.join(base, 'home'))) {
-    const res = await fetch(`http://127.0.0.1:${recPort}/hook?src=repo-synapse`, {
+    const res = await fetch(`http://127.0.0.1:${recPort}/hook?src=neurons`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body,

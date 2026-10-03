@@ -193,6 +193,7 @@ export class Normalizer {
         this.#sessions.set(sessionId, session);
       }
       session.ended = false;
+      delete session.cleared;
       out.push(this.#event(p, ts, { action: 'session_start', phase: 'info', paths: [] }, false));
     }
     session.lastSeen = ts;
@@ -237,6 +238,8 @@ export class Normalizer {
       case 'SessionEnd': {
         session.ended = true;
         const reason = str(p.reason);
+        if (reason === 'clear') session.cleared = true;
+        else delete session.cleared;
         out.push(this.#event(p, ts, { action: 'session_end', phase: 'info', paths: [], detail: reason && shortDetail(reason) }));
         break;
       }

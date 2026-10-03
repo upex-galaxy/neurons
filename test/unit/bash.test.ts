@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { classifyBash, extractPathsFromOutput, type BashClassification } from '../../src/server/bash.ts';
 
-process.env.CLAUDE_CONFIG_DIR = '/nonexistent/repo-synapse-test-config';
+process.env.CLAUDE_CONFIG_DIR = '/nonexistent/neurons-test-config';
 
 type Row = [command: string, kind: BashClassification['kind'], pathArgs: string[], pattern?: string];
 

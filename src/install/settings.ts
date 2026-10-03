@@ -1,10 +1,14 @@
-// Installs and removes repo-synapse's HTTP hooks in <repo>/.claude/settings.local.json,
+// Installs and removes Neurons' HTTP hooks in <repo>/.claude/settings.local.json,
 // toggles bashEditDiffEnabled in the user settings, and inspects the environment
 // for `doctor`.
 //
 // Rules (docs/IMPLEMENTATION_PLAN.md §8):
-// - Our hooks are identified by the exact URL http://127.0.0.1:<port>/hook?src=repo-synapse.
-//   Foreign hooks are never touched, even when they point at the same host and port.
+// - Our hooks are identified by the exact URL http://127.0.0.1:<port>/hook?src=neurons.
+//   The exact URL of the versions named repo-synapse (?src=repo-synapse) is ours too and
+//   is removed by every install and uninstall. Foreign hooks are never touched, even when
+//   they point at the same host and port.
+// - An install left by a repo-synapse version (<repo>/.repo-synapse/install.json) is undone
+//   the way that version would have done it before anything else is written.
 // - The original bytes are backed up before the first write and restored when, after
 //   removing our hooks, the content is the same as the backup.
 // - Invalid JSON aborts: we never overwrite a file we could not parse.
@@ -18,7 +22,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_PORT, HOOK_QUERY_MARKER } from '../shared/types.ts';
+import { DEFAULT_PORT, HOOK_QUERY_MARKER, LEGACY_STATE_DIR_NAME, STATE_DIR_NAME } from '../shared/types.ts';
 
 // ---------------------------------------------------------------- constants
 
@@ -41,11 +45,17 @@ export const HOOK_EVENTS = [
 ] as const;
 
 export const HOOK_TIMEOUT_S = 2;
-export const STATE_DIR = '.repo-synapse';
+export const STATE_DIR = STATE_DIR_NAME;
+/** State dir of the versions named repo-synapse (<= 0.1.0): only migrated and cleaned. */
+export const LEGACY_STATE_DIR = LEGACY_STATE_DIR_NAME;
 export const LOCAL_SETTINGS_REL = path.join('.claude', 'settings.local.json');
-export const EXCLUDE_ENTRIES = ['.claude/settings.local.json', '.repo-synapse/'] as const;
+export const EXCLUDE_ENTRIES = ['.claude/settings.local.json', `${STATE_DIR}/`] as const;
+/** Names of the CLI bin, current and legacy (see lockStatus). */
+export const BIN_NAMES = ['neu', 'neurons', 'repo-synapse'] as const;
 
-const OWN_URL_RE = /^http:\/\/127\.0\.0\.1:\d+\/hook\?src=repo-synapse$/;
+// Exact URLs only: a prefix would also match other tools' hooks (docs/DECISIONS.md I2).
+const OWN_URL_RE = /^http:\/\/127\.0\.0\.1:\d+\/hook\?src=neurons$/;
+const LEGACY_URL_RE = /^http:\/\/127\.0\.0\.1:\d+\/hook\?src=repo-synapse$/;
 const MIN_NODE: [number, number] = [22, 12];
 
 // ---------------------------------------------------------------- types
@@ -93,6 +103,8 @@ export interface DoctorReport {
   sources: SettingsSourceInfo[];
   /** Ports of our hooks currently in settings.local.json (empty = not installed). */
   installedPorts: number[];
+  /** Ports of hooks left by a repo-synapse version (removed by the next start/install/uninstall). */
+  legacyPorts: number[];
   manifest: InstallManifest | null;
   lock: { pid: number; alive: boolean } | null;
   checks: DoctorCheck[];
@@ -108,13 +120,28 @@ function isPlainObject(v: unknown): v is JsonObject {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-export function isOwnHook(h: unknown): boolean {
+function httpUrlMatches(h: unknown, re: RegExp): boolean {
   if (!isPlainObject(h)) return false;
-  return h.type === 'http' && typeof h.url === 'string' && OWN_URL_RE.test(h.url);
+  return h.type === 'http' && typeof h.url === 'string' && re.test(h.url);
 }
 
-function ownHookPort(h: unknown): number | undefined {
-  if (!isOwnHook(h)) return undefined;
+/** A hook installed by this version (exact URL, `?src=neurons`). */
+export function isOwnHook(h: unknown): boolean {
+  return httpUrlMatches(h, OWN_URL_RE);
+}
+
+/** A hook installed by a repo-synapse version (exact URL, `?src=repo-synapse`). */
+export function isLegacyHook(h: unknown): boolean {
+  return httpUrlMatches(h, LEGACY_URL_RE);
+}
+
+/** Ours to remove: current or legacy. */
+function isRemovableHook(h: unknown): boolean {
+  return isOwnHook(h) || isLegacyHook(h);
+}
+
+function hookPort(h: unknown, match: (h: unknown) => boolean): number | undefined {
+  if (!match(h)) return undefined;
   const m = /:(\d+)\/hook/.exec((h as { url: string }).url);
   return m?.[1] ? Number(m[1]) : undefined;
 }
@@ -205,12 +232,12 @@ function hooksObjectOf(settings: JsonObject): JsonObject | undefined {
 }
 
 /**
- * Removes our hook objects (mutates `settings`). `groups`: drop groups that became
+ * Removes our hook objects, current and legacy (mutates `settings`). `groups`: drop groups that became
  * empty because of that removal. `containers`: also drop event arrays and the
  * "hooks" object that became empty because of it. Containers that were already
  * empty are never dropped. Returns the number of hooks removed.
  */
-function stripOwn(settings: JsonObject, prune: { groups: boolean; containers: boolean }): number {
+function stripOwn(settings: JsonObject, prune: { groups: boolean; containers: boolean }, remove: (h: unknown) => boolean = isRemovableHook): number {
   const hooks = hooksObjectOf(settings);
   if (!hooks) return 0;
   let removed = 0;
@@ -223,7 +250,7 @@ function stripOwn(settings: JsonObject, prune: { groups: boolean; containers: bo
     for (const g of groups as unknown[]) {
       if (isPlainObject(g) && Array.isArray(g.hooks)) {
         const before = g.hooks.length;
-        const kept = g.hooks.filter((h) => !isOwnHook(h));
+        const kept = g.hooks.filter((h) => !remove(h));
         if (kept.length !== before) {
           removed += before - kept.length;
           g.hooks = kept;
@@ -247,15 +274,19 @@ function stripOwn(settings: JsonObject, prune: { groups: boolean; containers: bo
   return removed;
 }
 
-/** Pure. Our hooks removed, containers emptied by that removal dropped. Foreign entries untouched. */
-export function removeOwnHooks(settings: object): object {
+/**
+ * Pure. Our hooks (current and legacy) removed, containers emptied by that removal dropped.
+ * Foreign entries untouched. `keepLegacy`: leave the repo-synapse hooks in place (one of
+ * its viewers is still running and receives events through them).
+ */
+export function removeOwnHooks(settings: object, o: { keepLegacy?: boolean } = {}): object {
   const out = clone(settings) as JsonObject;
-  stripOwn(out, { groups: true, containers: true });
+  stripOwn(out, { groups: true, containers: true }, o.keepLegacy ? isOwnHook : isRemovableHook);
   return out;
 }
 
 /**
- * Pure. Removes our previous entries (any port) and appends one group per event,
+ * Pure. Removes our previous entries (any port, current and legacy) and appends one group per event,
  * without matcher, pointing at `port`. Existing keys keep their order; new event
  * keys are appended in HOOK_EVENTS order, and "hooks" at the end when missing.
  */
@@ -276,9 +307,9 @@ export function mergeHooks(settings: object, port: number): object {
 }
 
 /** Our hooks removed and every empty group/array/hooks object dropped: used only to compare. */
-function canonical(settings: JsonObject): JsonObject {
+function canonical(settings: JsonObject, remove: (h: unknown) => boolean = isRemovableHook): JsonObject {
   const out = clone(settings);
-  stripOwn(out, { groups: true, containers: true });
+  stripOwn(out, { groups: true, containers: true }, remove);
   const hooks = out.hooks;
   if (isPlainObject(hooks)) {
     for (const event of Object.keys(hooks)) {
@@ -293,7 +324,7 @@ function canonical(settings: JsonObject): JsonObject {
   return out;
 }
 
-function ownPorts(settings: JsonObject): number[] {
+function hookPorts(settings: JsonObject, match: (h: unknown) => boolean): number[] {
   const ports = new Set<number>();
   const hooks = settings.hooks;
   if (!isPlainObject(hooks)) return [];
@@ -302,7 +333,7 @@ function ownPorts(settings: JsonObject): number[] {
     for (const g of groups) {
       if (!isPlainObject(g) || !Array.isArray(g.hooks)) continue;
       for (const h of g.hooks) {
-        const p = ownHookPort(h);
+        const p = hookPort(h, match);
         if (p !== undefined) ports.add(p);
       }
     }
@@ -320,25 +351,37 @@ export function stateDir(repoRoot: string): string {
   return path.join(repoRoot, STATE_DIR);
 }
 
-function manifestPath(repoRoot: string): string {
-  return path.join(stateDir(repoRoot), 'install.json');
+/** <repo>/.repo-synapse: the state dir of the versions named repo-synapse. */
+export function legacyStateDir(repoRoot: string): string {
+  return path.join(repoRoot, LEGACY_STATE_DIR);
 }
 
-function backupPath(repoRoot: string): string {
-  return path.join(stateDir(repoRoot), 'settings.local.json.bak');
+// The helpers below take a state dir (current or legacy): both versions use the same layout.
+
+function manifestPath(dir: string): string {
+  return path.join(dir, 'install.json');
 }
 
-/** Where builds before the fix kept the user settings backup (inside the repo). Only removed now. */
+function backupPath(dir: string): string {
+  return path.join(dir, 'settings.local.json.bak');
+}
+
+/** Where early repo-synapse builds kept the user settings backup (inside the repo). Only removed now. */
 function legacyUserBackupPath(repoRoot: string): string {
-  return path.join(stateDir(repoRoot), 'user-settings.bak');
+  return path.join(legacyStateDir(repoRoot), 'user-settings.bak');
 }
 
 export function lockPath(repoRoot: string): string {
   return path.join(stateDir(repoRoot), 'lock');
 }
 
-export function readManifest(repoRoot: string): InstallManifest | null {
-  const raw = readBytes(manifestPath(repoRoot));
+/** The lock of a repo-synapse version running on the repo. Only read (and removed when stale). */
+export function legacyLockPath(repoRoot: string): string {
+  return path.join(legacyStateDir(repoRoot), 'lock');
+}
+
+function readManifestIn(dir: string): InstallManifest | null {
+  const raw = readBytes(manifestPath(dir));
   if (!raw) return null;
   try {
     const v: unknown = JSON.parse(raw.toString('utf8'));
@@ -348,8 +391,17 @@ export function readManifest(repoRoot: string): InstallManifest | null {
   }
 }
 
+export function readManifest(repoRoot: string): InstallManifest | null {
+  return readManifestIn(stateDir(repoRoot));
+}
+
+/** The manifest an install by a repo-synapse version left behind, or null. */
+export function readLegacyManifest(repoRoot: string): InstallManifest | null {
+  return readManifestIn(legacyStateDir(repoRoot));
+}
+
 function writeManifest(repoRoot: string, m: InstallManifest): void {
-  writeFileAtomic(manifestPath(repoRoot), serialize(m));
+  writeFileAtomic(manifestPath(stateDir(repoRoot)), serialize(m));
 }
 
 /** Merges fields into an existing manifest. No-op when there is none (hooks not installed). */
@@ -378,7 +430,7 @@ function git(repoRoot: string, args: string[], input?: string): { code: number; 
 }
 
 /**
- * Adds `.claude/settings.local.json` and `.repo-synapse/` to .git/info/exclude when
+ * Adds `.claude/settings.local.json` and `.neurons/` to .git/info/exclude when
  * git does not ignore them yet. Returns the entries added. Not a git repo -> [].
  */
 export function ensureGitExcluded(repoRoot: string): string[] {
@@ -396,7 +448,7 @@ export function ensureGitExcluded(repoRoot: string): string[] {
   if (missing.length === 0) return [];
   const prev = readBytes(excludeFile)?.toString('utf8') ?? '';
   const lines = missing.map((e) => `/${prefix}${e}`);
-  const block = `${prev === '' || prev.endsWith('\n') ? '' : '\n'}# repo-synapse\n${lines.join('\n')}\n`;
+  const block = `${prev === '' || prev.endsWith('\n') ? '' : '\n'}# neurons\n${lines.join('\n')}\n`;
   fs.mkdirSync(path.dirname(excludeFile), { recursive: true });
   fs.appendFileSync(excludeFile, block);
   return missing;
@@ -413,20 +465,24 @@ export interface InstallResult {
 }
 
 export function installHooksSync(o: { repoRoot: string; port: number }): InstallResult {
+  // A repo-synapse install still on disk owns the original bytes: put them back first,
+  // so the backup taken below is the user's file and not one with that version's hooks.
+  undoLegacyInstallSync(o);
   const file = localSettingsPath(o.repoRoot);
   const claudeDir = path.dirname(file);
   const raw = readBytes(file);
   const current = raw ? parseSettings(raw.toString('utf8'), file) : {};
   const merged = mergeHooks(current, o.port);
 
-  fs.mkdirSync(stateDir(o.repoRoot), { recursive: true });
+  const dir = stateDir(o.repoRoot);
+  fs.mkdirSync(dir, { recursive: true });
   const existing = readManifest(o.repoRoot);
   if (existing) {
     // A previous install (maybe a crashed run) owns the backup: keep it.
     writeManifest(o.repoRoot, { ...existing, port: o.port });
   } else {
-    if (raw) fs.writeFileSync(backupPath(o.repoRoot), raw);
-    else fs.rmSync(backupPath(o.repoRoot), { force: true });
+    if (raw) fs.writeFileSync(backupPath(dir), raw);
+    else fs.rmSync(backupPath(dir), { force: true });
     writeManifest(o.repoRoot, {
       version: 1,
       createdFile: raw === undefined,
@@ -458,16 +514,24 @@ function removeDirIfEmpty(dir: string): void {
   }
 }
 
-export function uninstallHooksSync(o: { repoRoot: string }): { changed: boolean } {
-  const file = localSettingsPath(o.repoRoot);
-  const manifest = readManifest(o.repoRoot);
+/**
+ * Removes our hooks (current and legacy) and undoes the install recorded in the state dir
+ * `dir`: the backup bytes come back when nothing else changed, a file we created is
+ * deleted when only our hooks were in it. Without a manifest in `dir` it only strips.
+ * `keepLegacy`: a repo-synapse viewer is running on the repo, so its hooks stay (and
+ * count as content: a backup without them is not put back over them).
+ */
+function undoInstallIn(repoRoot: string, dir: string, keepLegacy = false): boolean {
+  const file = localSettingsPath(repoRoot);
+  const manifest = readManifestIn(dir);
   const raw = readBytes(file);
+  const remove = keepLegacy ? isOwnHook : isRemovableHook;
   let changed = false;
 
   if (raw) {
     const current = parseSettings(raw.toString('utf8'), file);
-    const stripped = removeOwnHooks(current) as JsonObject;
-    const backup = manifest && !manifest.createdFile ? readBytes(backupPath(o.repoRoot)) : undefined;
+    const stripped = removeOwnHooks(current, { keepLegacy }) as JsonObject;
+    const backup = manifest && !manifest.createdFile ? readBytes(backupPath(dir)) : undefined;
     let backupJson: JsonObject | undefined;
     if (backup) {
       try {
@@ -476,12 +540,15 @@ export function uninstallHooksSync(o: { repoRoot: string }): { changed: boolean 
         backupJson = undefined;
       }
     }
-    if (backup && backupJson && deepEqual(canonical(stripped), canonical(backupJson))) {
+    // A backup that holds hooks of ours (e.g. a repo-synapse version's, taken without its
+    // manifest) cannot be put back byte for byte: it would bring them back.
+    const backupClean = backupJson !== undefined && deepEqual(removeOwnHooks(backupJson), backupJson);
+    if (backup && backupJson && backupClean && deepEqual(canonical(stripped, remove), canonical(backupJson, remove))) {
       if (!raw.equals(backup)) {
         writeFileAtomic(file, backup);
         changed = true;
       }
-    } else if (manifest?.createdFile && Object.keys(canonical(stripped)).length === 0) {
+    } else if (manifest?.createdFile && Object.keys(canonical(stripped, remove)).length === 0) {
       fs.rmSync(file, { force: true });
       changed = true;
     } else if (!deepEqual(stripped, current)) {
@@ -492,10 +559,46 @@ export function uninstallHooksSync(o: { repoRoot: string }): { changed: boolean 
 
   if (manifest?.createdClaudeDir && !fs.existsSync(file)) removeDirIfEmpty(path.dirname(file));
   if (manifest) {
-    fs.rmSync(backupPath(o.repoRoot), { force: true });
-    fs.rmSync(manifestPath(o.repoRoot), { force: true });
+    fs.rmSync(backupPath(dir), { force: true });
+    fs.rmSync(manifestPath(dir), { force: true });
   }
-  return { changed };
+  return changed;
+}
+
+/** A repo-synapse viewer (other than this process) holds a live lock on the repo. */
+export function isLegacyViewerRunning(repoRoot: string): boolean {
+  const lock = readLegacyLock(repoRoot);
+  return lock !== null && lock.alive && lock.pid !== process.pid;
+}
+
+/**
+ * Undoes an install left by a repo-synapse version (<repo>/.repo-synapse/install.json) the
+ * way that version's uninstall would: its backup bytes come back, or the file it created
+ * goes away. Its events.jsonl is kept (replay still reads it); a stale lock goes, and the
+ * dir too when that leaves it empty. `found`: there was such an install. Nothing is
+ * touched while that version's viewer is still running: its exit undoes it.
+ */
+export function undoLegacyInstallSync(o: { repoRoot: string }): { found: boolean; changed: boolean } {
+  const dir = legacyStateDir(o.repoRoot);
+  if (!readManifestIn(dir)) return { found: false, changed: false };
+  if (isLegacyViewerRunning(o.repoRoot)) return { found: true, changed: false };
+  const changed = undoInstallIn(o.repoRoot, dir);
+  const lock = readLegacyLock(o.repoRoot);
+  if (lock && !lock.alive) fs.rmSync(legacyLockPath(o.repoRoot), { force: true });
+  removeDirIfEmpty(dir);
+  return { found: true, changed };
+}
+
+/**
+ * Removes our hooks and undoes our install. While a repo-synapse viewer runs on the repo
+ * (started after this one: `start` refuses the other order), its hooks and its install
+ * are left alone, so it keeps receiving events and its own exit restores the file.
+ */
+export function uninstallHooksSync(o: { repoRoot: string }): { changed: boolean } {
+  const legacyRunning = isLegacyViewerRunning(o.repoRoot);
+  const legacy = undoLegacyInstallSync(o).changed;
+  const current = undoInstallIn(o.repoRoot, stateDir(o.repoRoot), legacyRunning);
+  return { changed: legacy || current };
 }
 
 export async function uninstallHooks(o: { repoRoot: string }): Promise<{ changed: boolean }> {
@@ -515,10 +618,15 @@ export function userSettingsPath(): string {
 
 // bashEditDiffEnabled is one key in the global user settings, shared by every viewer
 // running on any repo. The record of our change lives next to that file (never inside a
-// repo): <config dir>/repo-synapse/bash-diff.json lists the viewers that need the key
+// repo): <config dir>/neurons/bash-diff.json lists the viewers that need the key
 // (repo + PID) and settings.json.bak holds the original bytes, both mode 0600. The key is
 // restored only when the last live viewer releases it, and the record is kept when the
 // restore cannot be done yet (invalid JSON, write error) so a later run can retry.
+// The versions named repo-synapse kept the same files in <config dir>/repo-synapse/: they
+// are moved here by the next enable or restore (migrateLegacyBashDiffState), but only once
+// no repo-synapse viewer listed there is alive. Until then enable and restore work on that
+// record in place, so the old viewer still sees the new ones as owners and still finds
+// its record when it exits.
 
 export interface BashDiffOwner {
   repo: string;
@@ -533,19 +641,33 @@ export interface BashDiffState {
 }
 
 export function bashDiffStateDir(): string {
+  return path.join(claudeConfigDir(), 'neurons');
+}
+
+/** Where the repo-synapse versions kept the record. Only read, migrated and removed. */
+export function legacyBashDiffStateDir(): string {
   return path.join(claudeConfigDir(), 'repo-synapse');
 }
 
-function bashDiffStatePath(): string {
-  return path.join(bashDiffStateDir(), 'bash-diff.json');
+function bashDiffStatePath(dir = bashDiffStateDir()): string {
+  return path.join(dir, 'bash-diff.json');
 }
 
-function bashDiffBackupPath(): string {
-  return path.join(bashDiffStateDir(), 'settings.json.bak');
+function bashDiffBackupPath(dir = bashDiffStateDir()): string {
+  return path.join(dir, 'settings.json.bak');
 }
 
 export function readBashDiffState(): BashDiffState | null {
-  const raw = readBytes(bashDiffStatePath());
+  return readBashDiffStateAt(bashDiffStatePath());
+}
+
+/** The record a repo-synapse version left, not migrated yet. */
+export function readLegacyBashDiffState(): BashDiffState | null {
+  return readBashDiffStateAt(bashDiffStatePath(legacyBashDiffStateDir()));
+}
+
+function readBashDiffStateAt(file: string): BashDiffState | null {
+  const raw = readBytes(file);
   if (!raw) return null;
   try {
     const v: unknown = JSON.parse(raw.toString('utf8'));
@@ -564,14 +686,64 @@ function writePrivate(file: string, data: string | Buffer): void {
   writeFileAtomic(file, data, 0o600);
 }
 
-function writeBashDiffState(st: BashDiffState): void {
-  writePrivate(bashDiffStatePath(), serialize(st));
+function writeBashDiffState(st: BashDiffState, dir = bashDiffStateDir()): void {
+  writePrivate(bashDiffStatePath(dir), serialize(st));
 }
 
-function clearBashDiffState(): void {
-  fs.rmSync(bashDiffStatePath(), { force: true });
-  fs.rmSync(bashDiffBackupPath(), { force: true });
-  removeDirIfEmpty(bashDiffStateDir());
+function clearBashDiffState(dir = bashDiffStateDir()): void {
+  fs.rmSync(bashDiffStatePath(dir), { force: true });
+  fs.rmSync(bashDiffBackupPath(dir), { force: true });
+  removeDirIfEmpty(dir);
+}
+
+function hasLiveOwner(st: BashDiffState): boolean {
+  return st.owners.some((x) => isPidAlive(x.pid));
+}
+
+/**
+ * The dir enable and restore work on: the repo-synapse one while its record is the only
+ * one and a viewer listed there is alive (that viewer restores from it on exit), else ours.
+ */
+function activeBashDiffDir(): string {
+  if (readBashDiffState()) return bashDiffStateDir();
+  const legacy = readLegacyBashDiffState();
+  return legacy && hasLiveOwner(legacy) ? legacyBashDiffStateDir() : bashDiffStateDir();
+}
+
+/**
+ * Moves a repo-synapse version's record of bashEditDiffEnabled into the current dir, so
+ * the last viewer still restores that change. Owners with dead PIDs are dropped. While a
+ * repo-synapse viewer listed there is alive the record stays where it is, since that
+ * viewer's own exit restores from it (see activeBashDiffDir). When a current record
+ * exists too, it is kept and the live legacy owners join it (the legacy record then stays
+ * until they are gone). Best effort: on a write error the legacy record stays for the next run.
+ */
+export function migrateLegacyBashDiffState(): boolean {
+  const legacyDir = legacyBashDiffStateDir();
+  const legacy = readLegacyBashDiffState();
+  if (!legacy) return false;
+  const live = legacy.owners.filter((x) => isPidAlive(x.pid));
+  const cur = readBashDiffState();
+  if (live.length > 0 && !cur) return false;
+  try {
+    if (cur) {
+      const owners = [...cur.owners];
+      for (const x of live) if (!owners.some((y) => y.repo === x.repo && y.pid === x.pid)) owners.push(x);
+      writeBashDiffState({ ...cur, owners });
+    } else {
+      const backup = readBytes(bashDiffBackupPath(legacyDir));
+      if (backup) writePrivate(bashDiffBackupPath(), backup);
+      else fs.rmSync(bashDiffBackupPath(), { force: true });
+      writeBashDiffState({ ...legacy, owners: live });
+    }
+  } catch {
+    return false;
+  }
+  if (live.length > 0) return true;
+  fs.rmSync(bashDiffStatePath(legacyDir), { force: true });
+  fs.rmSync(bashDiffBackupPath(legacyDir), { force: true });
+  removeDirIfEmpty(legacyDir);
+  return true;
 }
 
 /** Live owners other than `repoRoot` (dead PIDs are crashed runs and are dropped). */
@@ -596,6 +768,8 @@ export interface EnableBashDiffResult {
  * Never creates the settings file. On a write error nothing is left behind and it throws.
  */
 export function enableBashEditDiffSync(o: { repoRoot: string; pid?: number }): EnableBashDiffResult {
+  migrateLegacyBashDiffState();
+  const dir = activeBashDiffDir();
   const file = userSettingsPath();
   const me: BashDiffOwner = { repo: o.repoRoot, pid: o.pid ?? process.pid };
   const raw = readBytes(file);
@@ -607,14 +781,14 @@ export function enableBashEditDiffSync(o: { repoRoot: string; pid?: number }): E
     return { changed: false, previous: { present: false }, settingsPath: file, reason: 'invalid' };
   }
 
-  const st = readBashDiffState();
+  const st = readBashDiffStateAt(bashDiffStatePath(dir));
   if (st) {
     // Our change is already in place (another viewer, or a run that crashed): share it.
     if (cur.bashEditDiffEnabled !== true) {
       cur.bashEditDiffEnabled = true;
       writeFileAtomic(file, serialize(cur));
     }
-    writeBashDiffState({ ...st, owners: [...otherLiveOwners(st, o.repoRoot), me] });
+    writeBashDiffState({ ...st, owners: [...otherLiveOwners(st, o.repoRoot), me] }, dir);
     return { changed: false, previous: st.previous, settingsPath: file, reason: 'shared' };
   }
 
@@ -658,22 +832,24 @@ export interface RestoreBashDiffResult {
  */
 export function restoreBashEditDiffSync(o: { repoRoot: string }): RestoreBashDiffResult {
   fs.rmSync(legacyUserBackupPath(o.repoRoot), { force: true });
-  const st = readBashDiffState();
+  migrateLegacyBashDiffState();
+  const dir = activeBashDiffDir();
+  const st = readBashDiffStateAt(bashDiffStatePath(dir));
   if (!st) return { changed: false, status: 'none' };
   const others = otherLiveOwners(st, o.repoRoot);
   if (others.length > 0) {
-    writeBashDiffState({ ...st, owners: others });
+    writeBashDiffState({ ...st, owners: others }, dir);
     return { changed: false, status: 'in-use', settingsPath: st.settingsPath };
   }
   const file = st.settingsPath;
   const keep = (error: string): RestoreBashDiffResult => {
-    writeBashDiffState({ ...st, owners: [] });
+    writeBashDiffState({ ...st, owners: [] }, dir);
     return { changed: false, status: 'pending', settingsPath: file, error };
   };
 
   const raw = readBytes(file);
   if (!raw) {
-    clearBashDiffState();
+    clearBashDiffState(dir);
     return { changed: false, status: 'untouched', settingsPath: file };
   }
   let cur: JsonObject;
@@ -683,14 +859,14 @@ export function restoreBashEditDiffSync(o: { repoRoot: string }): RestoreBashDif
     return keep(`${file} no es JSON válido`);
   }
   if (cur.bashEditDiffEnabled !== true) {
-    clearBashDiffState();
+    clearBashDiffState(dir);
     return { changed: false, status: 'untouched', settingsPath: file };
   }
   if (st.previous.present) cur.bashEditDiffEnabled = st.previous.value;
   else delete cur.bashEditDiffEnabled;
 
   let data: string | Buffer = serialize(cur);
-  const backup = readBytes(bashDiffBackupPath());
+  const backup = readBytes(bashDiffBackupPath(dir));
   if (backup) {
     try {
       if (deepEqual(parseSettings(backup.toString('utf8'), 'backup'), cur)) data = backup;
@@ -703,7 +879,7 @@ export function restoreBashEditDiffSync(o: { repoRoot: string }): RestoreBashDif
   } catch (err) {
     return keep((err as Error).message);
   }
-  clearBashDiffState();
+  clearBashDiffState(dir);
   return { changed: true, status: 'restored', settingsPath: file };
 }
 
@@ -724,7 +900,7 @@ export function isPidAlive(pid: number): boolean {
 }
 
 /** Slack for the 1 s resolution of `ps -o etime` and for clock jitter. */
-const LOCK_START_SLACK_MS = 5000;
+export const LOCK_START_SLACK_MS = 5000;
 
 /**
  * When `pid` started (epoch ms), from `ps -o etime=` ([[dd-]hh:]mm:ss, locale independent).
@@ -750,7 +926,7 @@ export function processStartMs(pid: number): number | undefined {
 }
 
 /** Command line of `pid` (`ps -o command=`), undefined when it cannot be read. */
-function processCommand(pid: number): string | undefined {
+export function processCommand(pid: number): string | undefined {
   if (process.platform === 'win32') return undefined;
   try {
     const text = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], {
@@ -764,23 +940,54 @@ function processCommand(pid: number): string | undefined {
   }
 }
 
+let ownCommandCache: string | null | undefined;
+
+/** This process's own `ps` command line (cached), recorded in the lock and the registry. */
+export function ownCommand(): string | undefined {
+  if (ownCommandCache === undefined) ownCommandCache = processCommand(process.pid) ?? null;
+  return ownCommandCache ?? undefined;
+}
+
 export interface LockInfo {
   pid: number;
   alive: boolean;
 }
 
 /**
- * Parses a lock's bytes ({"pid":N,"startedAt":ISO,"cmd":script} or a bare number).
- * `alive` also requires the process to be the lock's owner: a PID reused after a crash
- * or a reboot belongs to a process that started after the lock was written. A process
- * whose command line still names the lock's script is taken as the owner anyway, since a
- * wall-clock step after start (NTP, VM resume) also moves the start time `ps` reports.
+ * True when the process `pid` started no later than `startedAt` (plus the slack): it can
+ * be the process that wrote a record at that time. False when unknown (no ps).
+ */
+export function startedBy(pid: number, startedAt: string): boolean {
+  const t = Date.parse(startedAt);
+  const procStart = processStartMs(pid);
+  return Number.isFinite(t) && procStart !== undefined && procStart <= t + LOCK_START_SLACK_MS;
+}
+
+/**
+ * True when the `ps` command line `actual` is the one a record names: `command`, the
+ * exact line the owner saw for itself, when the record has it; else one that runs the
+ * script `cmd` (commandRunsScript).
+ */
+export function commandMatches(actual: string, rec: { cmd?: string; command?: string }): boolean {
+  if (rec.command !== undefined && rec.command !== '') return actual === rec.command;
+  return rec.cmd !== undefined && rec.cmd !== '' && commandRunsScript(actual, rec.cmd);
+}
+
+/**
+ * Parses a lock's bytes ({"pid":N,"startedAt":ISO,"cmd":script,"command":psLine} or a
+ * bare number). `alive` also requires the process to be the lock's owner: a PID reused
+ * after a crash or a reboot belongs to a process that started after the lock was written.
+ * A process whose command line is still the lock's (commandMatches) is taken as the owner
+ * anyway, since a wall-clock step after start (NTP, VM resume) also moves the start time
+ * `ps` reports. That fallback is for liveness only: signals require startedBy too (see
+ * isNeuronsViewer). Locks written by a repo-synapse version have the same format.
  */
 export function lockStatus(raw: Buffer): LockInfo {
   const text = raw.toString('utf8').trim();
   let pid = Number.NaN;
   let startedAt = Number.NaN;
   let cmd: string | undefined;
+  let recorded: string | undefined;
   try {
     const v: unknown = JSON.parse(text);
     if (typeof v === 'number') pid = v;
@@ -788,6 +995,7 @@ export function lockStatus(raw: Buffer): LockInfo {
       pid = v.pid;
       if (typeof v.startedAt === 'string') startedAt = Date.parse(v.startedAt);
       if (typeof v.cmd === 'string' && v.cmd.length > 0) cmd = v.cmd;
+      if (typeof v.command === 'string' && v.command.length > 0) recorded = v.command;
     }
   } catch {
     pid = Number.parseInt(text, 10);
@@ -797,16 +1005,49 @@ export function lockStatus(raw: Buffer): LockInfo {
   if (pid !== process.pid && Number.isFinite(startedAt)) {
     const procStart = processStartMs(pid);
     if (procStart !== undefined && procStart > startedAt + LOCK_START_SLACK_MS) {
-      const alive = cmd !== undefined && (processCommand(pid)?.includes(cmd) ?? false);
+      if (cmd === undefined && recorded === undefined) return { pid, alive: false };
+      const command = processCommand(pid);
+      const alive = command !== undefined && commandMatches(command, { cmd, command: recorded });
       return { pid, alive };
     }
   }
   return { pid, alive: true };
 }
 
-/** Reads <repo>/.repo-synapse/lock; null when there is none. See lockStatus. */
+/**
+ * True when the `ps` command line `command` runs the lock's script `cmd`: that path, or,
+ * when `cmd` is one of the CLI's bins (BIN_NAMES), any of them in the same directory, so
+ * a lock written through `repo-synapse` or `neurons` still matches a run through `neu`.
+ * The path must be a whole argument (whitespace or the line's ends around it): a longer
+ * path that starts with it (`/usr/local/bin/neutron`, `cli.js.bak`) is another program.
+ */
+export function commandRunsScript(command: string, cmd: string): boolean {
+  if (hasArgument(command, cmd)) return true;
+  if (!(BIN_NAMES as readonly string[]).includes(path.basename(cmd))) return false;
+  const dir = path.dirname(cmd);
+  return BIN_NAMES.some((name) => hasArgument(command, path.join(dir, name)));
+}
+
+/** `arg` appears in the command line `command` as a whole, space-delimited argument. */
+function hasArgument(command: string, arg: string): boolean {
+  if (arg === '') return false;
+  for (let i = command.indexOf(arg); i !== -1; i = command.indexOf(arg, i + 1)) {
+    const before = i === 0 ? ' ' : command.charAt(i - 1);
+    const after = i + arg.length >= command.length ? ' ' : command.charAt(i + arg.length);
+    if (/\s/.test(before) && /\s/.test(after)) return true;
+  }
+  return false;
+}
+
+/** Reads <repo>/.neurons/lock; null when there is none. See lockStatus. */
 export function readLock(repoRoot: string): LockInfo | null {
   const raw = readBytes(lockPath(repoRoot));
+  return raw ? lockStatus(raw) : null;
+}
+
+/** Reads <repo>/.repo-synapse/lock (a repo-synapse version's viewer); null when there is none. */
+export function readLegacyLock(repoRoot: string): LockInfo | null {
+  const raw = readBytes(legacyLockPath(repoRoot));
   return raw ? lockStatus(raw) : null;
 }
 
@@ -891,7 +1132,7 @@ export type LockAcquireResult =
   | { ok: false; reason: 'busy' };
 
 /**
- * Takes <repo>/.repo-synapse/lock for this process. A stale lock (dead PID, or a PID
+ * Takes <repo>/.neurons/lock for this process. A stale lock (dead PID, or a PID
  * reused by a process that is not its owner) is taken over; any number of starts racing
  * on it end with exactly one owner. `busy`: other starts kept the lock in flux until
  * `timeoutMs`.
@@ -901,6 +1142,8 @@ export function acquireLockSync(repoRoot: string, o: { timeoutMs?: number } = {}
   const file = lockPath(repoRoot);
   const own: Record<string, unknown> = { pid: process.pid, startedAt: new Date().toISOString() };
   if (process.argv[1]) own.cmd = process.argv[1];
+  const command = ownCommand();
+  if (command) own.command = command;
   const data = JSON.stringify(own) + '\n';
   const deadline = Date.now() + (o.timeoutMs ?? 3000);
   let tookOver: number | undefined;
@@ -1009,9 +1252,11 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
   }
 
   const local = parsed.find((p) => p.scope === 'local');
-  const installedPorts = local ? ownPorts(local.json) : [];
+  const installedPorts = local ? hookPorts(local.json, isOwnHook) : [];
+  const legacyPorts = local ? hookPorts(local.json, isLegacyHook) : [];
   const manifest = readManifest(repoRoot);
   const lock = readLock(repoRoot);
+  const legacyLock = readLegacyLock(repoRoot);
   const port = installedPorts[0] ?? manifest?.port ?? DEFAULT_PORT;
   const url = hookUrl(port);
 
@@ -1020,11 +1265,21 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
       id: 'installed',
       status: lock?.alive ? 'ok' : 'warn',
       message: lock?.alive
-        ? `Hooks instalados en el puerto ${installedPorts.join(', ')} (repo-synapse corriendo, PID ${lock.pid}).`
-        : `Hay hooks de repo-synapse en el puerto ${installedPorts.join(', ')} pero el visor no está corriendo: Claude Code mostrará "hook error". Ejecutá "repo-synapse uninstall".`,
+        ? `Hooks instalados en el puerto ${installedPorts.join(', ')} (Neurons corriendo, PID ${lock.pid}).`
+        : `Hay hooks de Neurons en el puerto ${installedPorts.join(', ')} pero el visor no está corriendo: Claude Code mostrará "hook error". Ejecutá "neu uninstall".`,
     });
   } else {
     checks.push({ id: 'installed', status: 'info', message: 'Los hooks no están instalados (se instalan al ejecutar "start").' });
+  }
+
+  if (legacyPorts.length > 0) {
+    checks.push({
+      id: 'legacy-hooks',
+      status: 'warn',
+      message: legacyLock?.alive
+        ? `Hay hooks de la versión anterior (repo-synapse) en el puerto ${legacyPorts.join(', ')}, y esa versión está corriendo (PID ${legacyLock.pid}).`
+        : `Hay hooks de la versión anterior (repo-synapse) en el puerto ${legacyPorts.join(', ')}: los quita el próximo "neu start", "neu install" o "neu uninstall".`,
+    });
   }
 
   if (lock) {
@@ -1032,8 +1287,15 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
       id: 'lock',
       status: lock.alive ? 'info' : 'warn',
       message: lock.alive
-        ? `repo-synapse está corriendo sobre este repo (PID ${lock.pid}).`
-        : `Hay un lock viejo (PID ${lock.pid}, ya no es de repo-synapse). El próximo "start" lo reemplaza.`,
+        ? `Neurons está corriendo sobre este repo (PID ${lock.pid}).`
+        : `Hay un lock viejo (PID ${lock.pid}, ya no es de Neurons). El próximo "start" lo reemplaza.`,
+    });
+  }
+  if (legacyLock?.alive) {
+    checks.push({
+      id: 'legacy-lock',
+      status: 'warn',
+      message: `La versión anterior (repo-synapse) está corriendo sobre este repo (PID ${legacyLock.pid}): cerrala antes de usar "neu start".`,
     });
   }
 
@@ -1050,7 +1312,7 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
         status: ok ? 'ok' : 'error',
         message: ok
           ? `allowedHttpHookUrls en la configuración ${scope} permite ${url}.`
-          : `allowedHttpHookUrls en la configuración ${scope} no incluye ${url}. Agregá "http://127.0.0.1:*/hook?src=repo-synapse".`,
+          : `allowedHttpHookUrls en la configuración ${scope} no incluye ${url}. Agregá "http://127.0.0.1:*/hook?src=neurons".`,
       });
     }
     if (p.json.allowManagedHooksOnly === true) {
@@ -1112,21 +1374,22 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
     checks.push({ id: 'bash-diff', status: 'info', message: 'bashEditDiffEnabled está apagado; "start" lo activa mientras corre.' });
   }
 
-  const bashState = readBashDiffState();
+  // Read only: the legacy record is migrated by the next enable or restore, not by doctor.
+  const bashState = readBashDiffState() ?? readLegacyBashDiffState();
   if (bashState) {
     const live = bashState.owners.filter((x) => isPidAlive(x.pid));
     checks.push(
       live.length > 0
-        ? { id: 'bash-diff-owners', status: 'info', message: `repo-synapse activó bashEditDiffEnabled; lo usan ${live.length} visor(es) abierto(s).` }
+        ? { id: 'bash-diff-owners', status: 'info', message: `Neurons activó bashEditDiffEnabled; lo usan ${live.length} visor(es) abierto(s).` }
         : {
             id: 'bash-diff-pending',
             status: 'warn',
-            message: `Quedó pendiente revertir bashEditDiffEnabled en ${bashState.settingsPath}. Ejecutá "repo-synapse uninstall" o quitá la clave a mano.`,
+            message: `Quedó pendiente revertir bashEditDiffEnabled en ${bashState.settingsPath}. Ejecutá "neu uninstall" o quitá la clave a mano.`,
           },
     );
   }
 
-  return { repoRoot, nodeVersion, nodeOk, sources, installedPorts, manifest, lock, checks };
+  return { repoRoot, nodeVersion, nodeOk, sources, installedPorts, legacyPorts, manifest, lock, checks };
 }
 
 export async function checkEnvironment(repoRoot: string): Promise<DoctorReport> {

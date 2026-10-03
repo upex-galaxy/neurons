@@ -9,16 +9,23 @@ import {
   lockStatus,
   checkEnvironmentSync,
   bashDiffStateDir,
+  commandRunsScript,
   enableBashEditDiff,
   ensureGitExcluded,
   installHooksSync,
   readBashDiffState,
   hookUrl,
   installHooks,
+  processCommand,
+  isLegacyHook,
   isOwnHook,
+  legacyBashDiffStateDir,
   mergeHooks,
   noProxyCovers,
+  readLegacyBashDiffState,
+  readLegacyManifest,
   readManifest,
+  uninstallHooksSync,
   removeOwnHooks,
   restoreBashEditDiff,
   uninstallHooks,
@@ -60,6 +67,7 @@ afterAll(() => {
 
 beforeEach(() => {
   fs.rmSync(path.join(cfgDir, 'settings.json'), { force: true });
+  fs.rmSync(path.join(cfgDir, 'neurons'), { recursive: true, force: true });
   fs.rmSync(path.join(cfgDir, 'repo-synapse'), { recursive: true, force: true });
 });
 
@@ -96,6 +104,37 @@ function ownEntries(settings: unknown): Array<{ event: string; url: string }> {
   return out;
 }
 
+/** `settings` with our hooks as a repo-synapse version wrote them (`?src=repo-synapse`). */
+function legacyMerged(settings: object, port: number): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(mergeHooks(settings, port)).replaceAll('?src=neurons', '?src=repo-synapse'));
+}
+
+function legacyEntries(settings: unknown): number {
+  const hooks = (settings as { hooks?: Record<string, Group[]> }).hooks ?? {};
+  return Object.values(hooks).reduce((n, groups) => n + groups.reduce((m, g) => m + g.hooks.filter(isLegacyHook).length, 0), 0);
+}
+
+/**
+ * Leaves `repo` as a repo-synapse version's install would: its hooks in the settings file,
+ * the original bytes (if any) in .repo-synapse/settings.local.json.bak, and its manifest.
+ */
+function writeLegacyInstall(repo: string, original: string | undefined, port = 7777): void {
+  const dir = path.join(repo, '.repo-synapse');
+  fs.mkdirSync(dir, { recursive: true });
+  const createdClaudeDir = !fs.existsSync(path.join(repo, '.claude'));
+  if (original !== undefined) fs.writeFileSync(path.join(dir, 'settings.local.json.bak'), original);
+  const manifest = {
+    version: 1,
+    createdFile: original === undefined,
+    createdClaudeDir,
+    backedUpAt: original === undefined ? null : '2026-09-30T12:00:00.000Z',
+    port,
+  };
+  fs.writeFileSync(path.join(dir, 'install.json'), JSON.stringify(manifest, null, 2) + '\n');
+  const base = original === undefined ? {} : (JSON.parse(original) as object);
+  writeLocal(repo, JSON.stringify(legacyMerged(base, port), null, 2) + '\n');
+}
+
 /** Realistic settings with foreign hooks: Orca-style command hooks plus a foreign http hook. */
 function foreignSettings(): Record<string, unknown> {
   return {
@@ -122,18 +161,30 @@ function foreignSettings(): Record<string, unknown> {
 
 describe('hookUrl / isOwnHook', () => {
   it('builds the marked loopback URL', () => {
-    expect(hookUrl(7777)).toBe('http://127.0.0.1:7777/hook?src=repo-synapse');
+    expect(hookUrl(7777)).toBe('http://127.0.0.1:7777/hook?src=neurons');
   });
 
   it('matches only the exact URL shape', () => {
     expect(isOwnHook({ type: 'http', url: hookUrl(1234) })).toBe(true);
     expect(isOwnHook({ type: 'http', url: 'http://127.0.0.1:7777/hook' })).toBe(false);
-    expect(isOwnHook({ type: 'http', url: 'http://localhost:7777/hook?src=repo-synapse' })).toBe(false);
-    expect(isOwnHook({ type: 'http', url: 'http://127.0.0.1:7777/hook?src=repo-synapse&x=1' })).toBe(false);
+    expect(isOwnHook({ type: 'http', url: 'http://localhost:7777/hook?src=neurons' })).toBe(false);
+    expect(isOwnHook({ type: 'http', url: 'http://127.0.0.1:7777/hook?src=neurons&x=1' })).toBe(false);
+    expect(isOwnHook({ type: 'http', url: 'http://127.0.0.1:7777/hook?src=neurons-x' })).toBe(false);
+    expect(isOwnHook({ type: 'http', url: 'http://127.0.0.1:7777/hook?src=repo-synapse' })).toBe(false);
     expect(isOwnHook({ type: 'command', url: hookUrl(7777) })).toBe(false);
-    expect(isOwnHook({ type: 'command', command: 'curl http://127.0.0.1:7777/hook?src=repo-synapse' })).toBe(false);
+    expect(isOwnHook({ type: 'command', command: 'curl http://127.0.0.1:7777/hook?src=neurons' })).toBe(false);
     expect(isOwnHook(null)).toBe(false);
     expect(isOwnHook('http')).toBe(false);
+  });
+
+  it('isLegacyHook matches only the exact URL of the repo-synapse versions', () => {
+    expect(isLegacyHook({ type: 'http', url: 'http://127.0.0.1:7777/hook?src=repo-synapse' })).toBe(true);
+    expect(isLegacyHook({ type: 'http', url: hookUrl(7777) })).toBe(false);
+    expect(isLegacyHook({ type: 'http', url: 'http://localhost:7777/hook?src=repo-synapse' })).toBe(false);
+    expect(isLegacyHook({ type: 'http', url: 'http://127.0.0.1:7777/hook?src=repo-synapse&x=1' })).toBe(false);
+    expect(isLegacyHook({ type: 'http', url: 'http://127.0.0.1:7777/hook?src=repo-synapse2' })).toBe(false);
+    expect(isLegacyHook({ type: 'http', url: 'http://127.0.0.1:7777/hook' })).toBe(false);
+    expect(isLegacyHook({ type: 'command', command: 'curl http://127.0.0.1:7777/hook?src=repo-synapse' })).toBe(false);
   });
 });
 
@@ -174,6 +225,13 @@ describe('mergeHooks', () => {
     expect(removeOwnHooks(twice)).toEqual(foreignSettings());
   });
 
+  it('replaces the hooks of a repo-synapse version instead of adding to them', () => {
+    const merged = mergeHooks(legacyMerged(foreignSettings(), 7777), 7790);
+    expect(legacyEntries(merged)).toBe(0);
+    expect(ownEntries(merged)).toHaveLength(HOOK_EVENTS.length);
+    expect(removeOwnHooks(merged)).toEqual(foreignSettings());
+  });
+
   it('refuses a malformed hooks value', () => {
     expect(() => mergeHooks({ hooks: [] }, 1)).toThrow();
     expect(() => mergeHooks({ hooks: { Stop: {} } }, 1)).toThrow();
@@ -185,6 +243,18 @@ describe('removeOwnHooks', () => {
     const lookalike = { type: 'http', url: 'http://127.0.0.1:7777/hook' };
     const s = { hooks: { Stop: [{ hooks: [lookalike, { type: 'http', url: hookUrl(7777) }] }] } };
     expect(removeOwnHooks(s)).toEqual({ hooks: { Stop: [{ hooks: [lookalike] }] } });
+  });
+
+  it('also removes the exact hooks of a repo-synapse version, and nothing that only looks like them', () => {
+    const lookalikes = [
+      { type: 'http', url: 'http://localhost:7777/hook?src=repo-synapse' },
+      { type: 'http', url: 'http://127.0.0.1:7777/hook?src=repo-synapse&x=1' },
+      { type: 'command', command: 'curl http://127.0.0.1:7777/hook?src=repo-synapse' },
+    ];
+    const legacy = { type: 'http', url: 'http://127.0.0.1:7777/hook?src=repo-synapse', timeout: 2 };
+    const s = { hooks: { Stop: [{ hooks: [...lookalikes, legacy, { type: 'http', url: hookUrl(7777) }] }], PreCompact: [{ hooks: [legacy] }] } };
+    expect(removeOwnHooks(s)).toEqual({ hooks: { Stop: [{ hooks: lookalikes }] } });
+    expect(removeOwnHooks(legacyMerged(foreignSettings(), 7777))).toEqual(foreignSettings());
   });
 
   it('drops only containers that became empty because of us', () => {
@@ -215,15 +285,15 @@ describe('installHooks / uninstallHooks', () => {
     expect(installed.endsWith('}\n')).toBe(true);
     expect(installed).toContain('\n  "hooks": {');
     expect(ownEntries(JSON.parse(installed))).toHaveLength(HOOK_EVENTS.length);
-    expect(fs.readFileSync(path.join(repo, '.repo-synapse', 'settings.local.json.bak'), 'utf8')).toBe(original);
+    expect(fs.readFileSync(path.join(repo, '.neurons', 'settings.local.json.bak'), 'utf8')).toBe(original);
     const m = readManifest(repo);
     expect(m).toMatchObject({ createdFile: false, createdClaudeDir: false, port: 7777 });
     expect(typeof m?.backedUpAt).toBe('string');
 
     expect(await uninstallHooks({ repoRoot: repo })).toEqual({ changed: true });
     expect(fs.readFileSync(localFile(repo), 'utf8')).toBe(original);
-    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'install.json'))).toBe(false);
-    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'settings.local.json.bak'))).toBe(false);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'install.json'))).toBe(false);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'settings.local.json.bak'))).toBe(false);
     // Idempotent.
     expect(await uninstallHooks({ repoRoot: repo })).toEqual({ changed: false });
     expect(fs.readFileSync(localFile(repo), 'utf8')).toBe(original);
@@ -312,7 +382,7 @@ describe('installHooks / uninstallHooks', () => {
     writeLocal(repo, broken);
     await expect(installHooks({ repoRoot: repo, port: 7777 })).rejects.toThrow(/JSON/);
     expect(fs.readFileSync(localFile(repo), 'utf8')).toBe(broken);
-    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'install.json'))).toBe(false);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'install.json'))).toBe(false);
     await expect(uninstallHooks({ repoRoot: repo })).rejects.toThrow(/JSON/);
     expect(fs.readFileSync(localFile(repo), 'utf8')).toBe(broken);
   });
@@ -325,7 +395,7 @@ describe('installHooks / uninstallHooks', () => {
     const after = fs.readFileSync(exclude, 'utf8');
     expect(after.startsWith(before)).toBe(true);
     expect(after).toContain('/.claude/settings.local.json\n');
-    expect(after).toContain('/.repo-synapse/\n');
+    expect(after).toContain('/.neurons/\n');
     const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: repo, encoding: 'utf8' });
     expect(status).toBe('');
     // Second time nothing is appended.
@@ -334,9 +404,97 @@ describe('installHooks / uninstallHooks', () => {
     await uninstallHooks({ repoRoot: repo });
   });
 
+  it('install and uninstall remove hooks of a repo-synapse version even without its manifest', async () => {
+    const repo = gitRepo();
+    writeLocal(repo, JSON.stringify(legacyMerged(foreignSettings(), 7777)));
+    await installHooks({ repoRoot: repo, port: 7790 });
+    const during = readJson(localFile(repo));
+    expect(legacyEntries(during)).toBe(0);
+    expect(ownEntries(during)).toHaveLength(HOOK_EVENTS.length);
+    await uninstallHooks({ repoRoot: repo });
+    expect(readJson(localFile(repo))).toEqual(foreignSettings());
+
+    const repo2 = gitRepo();
+    writeLocal(repo2, JSON.stringify(legacyMerged(foreignSettings(), 7777)));
+    expect(await uninstallHooks({ repoRoot: repo2 })).toEqual({ changed: true });
+    expect(readJson(localFile(repo2))).toEqual(foreignSettings());
+  });
+
+  it('install undoes a repo-synapse install first: its backup bytes become ours, its log stays', async () => {
+    const repo = gitRepo();
+    const original = '{\n\t"model":   "opus"\n}';
+    writeLegacyInstall(repo, original);
+    fs.writeFileSync(path.join(repo, '.repo-synapse', 'events.jsonl'), '{"kind":"tree"}\n');
+    fs.writeFileSync(path.join(repo, '.repo-synapse', 'lock'), JSON.stringify({ pid: DEAD_PID }));
+    await installHooks({ repoRoot: repo, port: 7790 });
+    expect(readLegacyManifest(repo)).toBeNull();
+    expect(fs.readdirSync(path.join(repo, '.repo-synapse'))).toEqual(['events.jsonl']);
+    expect(fs.readFileSync(path.join(repo, '.neurons', 'settings.local.json.bak'), 'utf8')).toBe(original);
+    expect(legacyEntries(readJson(localFile(repo)))).toBe(0);
+    expect(ownEntries(readJson(localFile(repo)))).toHaveLength(HOOK_EVENTS.length);
+    await uninstallHooks({ repoRoot: repo });
+    expect(fs.readFileSync(localFile(repo), 'utf8')).toBe(original);
+    expect(fs.readFileSync(path.join(repo, '.repo-synapse', 'events.jsonl'), 'utf8')).toBe('{"kind":"tree"}\n');
+  });
+
+  it('uninstall undoes a repo-synapse install: restores its bytes or deletes the file it created', async () => {
+    const repo = gitRepo();
+    const original = JSON.stringify(foreignSettings(), null, 4);
+    writeLegacyInstall(repo, original);
+    expect(await uninstallHooks({ repoRoot: repo })).toEqual({ changed: true });
+    expect(fs.readFileSync(localFile(repo), 'utf8')).toBe(original);
+    expect(fs.existsSync(path.join(repo, '.repo-synapse'))).toBe(false);
+
+    const repo2 = gitRepo();
+    writeLegacyInstall(repo2, undefined);
+    expect(await uninstallHooks({ repoRoot: repo2 })).toEqual({ changed: true });
+    expect(fs.existsSync(path.join(repo2, '.claude'))).toBe(false);
+    expect(fs.existsSync(path.join(repo2, '.repo-synapse'))).toBe(false);
+    expect(await uninstallHooks({ repoRoot: repo2 })).toEqual({ changed: false });
+  });
+
+  // Regression (F4): the cleanup of a neu viewer stripped the hooks of a repo-synapse viewer
+  // started after it on the same repo, and deleted that viewer's manifest and backup.
+  it('a running repo-synapse viewer keeps its hooks and its install when ours is undone', async () => {
+    const repo = gitRepo();
+    const original = '{"permissions":{"allow":[]}}';
+    writeLocal(repo, original);
+    installHooksSync({ repoRoot: repo, port: 7790 });
+    // The old version starts next to it: its backup holds our hooks, then it adds its own.
+    const dir = path.join(repo, '.repo-synapse');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'settings.local.json.bak'), fs.readFileSync(localFile(repo)));
+    fs.writeFileSync(
+      path.join(dir, 'install.json'),
+      JSON.stringify({ version: 1, createdFile: false, createdClaudeDir: false, backedUpAt: '2026-10-03T12:00:00.000Z', port: 7791 }),
+    );
+    const settings = readJson(localFile(repo)) as { hooks: Record<string, Group[]> };
+    for (const event of HOOK_EVENTS) settings.hooks[event]!.push({ hooks: [{ type: 'http', url: 'http://127.0.0.1:7791/hook?src=repo-synapse', timeout: 2 }] });
+    writeLocal(repo, JSON.stringify(settings, null, 2));
+    const k = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    try {
+      fs.writeFileSync(path.join(dir, 'lock'), JSON.stringify({ pid: k.pid, startedAt: new Date(Date.now() + 1000).toISOString() }));
+      expect(uninstallHooksSync({ repoRoot: repo })).toEqual({ changed: true });
+      const after = readJson(localFile(repo));
+      expect(ownEntries(after)).toEqual([]);
+      expect(legacyEntries(after)).toBe(HOOK_EVENTS.length);
+      expect(after.permissions).toEqual({ allow: [] });
+      expect(readLegacyManifest(repo)).not.toBeNull();
+      expect(fs.existsSync(path.join(dir, 'settings.local.json.bak'))).toBe(true);
+      expect(fs.existsSync(path.join(repo, '.neurons', 'install.json'))).toBe(false);
+    } finally {
+      k.kill('SIGKILL');
+      await new Promise((r) => k.once('exit', r));
+    }
+    // Once it is gone, its install is undone: its backup holds our hooks, so the clean JSON is written.
+    expect(uninstallHooksSync({ repoRoot: repo })).toEqual({ changed: true });
+    expect(readJson(localFile(repo))).toEqual(JSON.parse(original));
+    expect(readLegacyManifest(repo)).toBeNull();
+  });
+
   it('skips entries already ignored by .gitignore and non-git dirs', async () => {
     const repo = gitRepo();
-    fs.writeFileSync(path.join(repo, '.gitignore'), '.repo-synapse/\n');
+    fs.writeFileSync(path.join(repo, '.gitignore'), '.neurons/\n');
     expect(ensureGitExcluded(repo)).toEqual(['.claude/settings.local.json']);
     const plain = tmp('rs-inst-plain-');
     expect(ensureGitExcluded(plain)).toEqual([]);
@@ -436,16 +594,105 @@ describe('enable / restore bashEditDiffEnabled', () => {
     const original = '{"env":{"GITHUB_TOKEN":"ghp_secret_value"}}';
     fs.writeFileSync(file, original, { mode: 0o600 });
     await enableBashEditDiff({ repoRoot: repo });
-    const inRepo = fs.existsSync(path.join(repo, '.repo-synapse'))
-      ? fs.readdirSync(path.join(repo, '.repo-synapse'), { recursive: true }).map(String)
+    const inRepo = fs.existsSync(path.join(repo, '.neurons'))
+      ? fs.readdirSync(path.join(repo, '.neurons'), { recursive: true }).map(String)
       : [];
-    for (const f of inRepo) expect(fs.readFileSync(path.join(repo, '.repo-synapse', f), 'utf8')).not.toContain('ghp_secret_value');
+    for (const f of inRepo) expect(fs.readFileSync(path.join(repo, '.neurons', f), 'utf8')).not.toContain('ghp_secret_value');
     const dir = bashDiffStateDir();
     expect(dir.startsWith(cfgDir)).toBe(true);
     for (const f of fs.readdirSync(dir)) expect(fs.statSync(path.join(dir, f)).mode & 0o077, f).toBe(0);
     await restoreBashEditDiff({ repoRoot: repo });
     expect(fs.readFileSync(file, 'utf8')).toBe(original);
     expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  /** A record as a repo-synapse version left it in <config dir>/repo-synapse/. */
+  function writeLegacyRegistry(settingsBytes: string, owners: Array<{ repo: string; pid: number }>): string {
+    const dir = legacyBashDiffStateDir();
+    expect(dir).toBe(path.join(cfgDir, 'repo-synapse'));
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(cfgDir, 'settings.json');
+    fs.writeFileSync(path.join(dir, 'settings.json.bak'), settingsBytes, { mode: 0o600 });
+    fs.writeFileSync(
+      path.join(dir, 'bash-diff.json'),
+      JSON.stringify({ version: 1, settingsPath: file, previous: { present: false }, owners }),
+      { mode: 0o600 },
+    );
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(settingsBytes), bashEditDiffEnabled: true }));
+    return file;
+  }
+
+  it('keeps its record in <config dir>/neurons', () => {
+    expect(bashDiffStateDir()).toBe(path.join(cfgDir, 'neurons'));
+  });
+
+  it('a record left by repo-synapse (crashed viewer) is migrated and restored byte for byte', async () => {
+    const repo = gitRepo();
+    const original = '{\n    "theme": "dark"\n}';
+    const file = writeLegacyRegistry(original, [{ repo, pid: DEAD_PID }]);
+    expect(checkEnvironmentSync(repo).checks.some((c) => c.id === 'bash-diff-pending')).toBe(true);
+    expect(await restoreBashEditDiff({ repoRoot: repo })).toMatchObject({ changed: true, status: 'restored' });
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    expect(fs.existsSync(legacyBashDiffStateDir())).toBe(false);
+    expect(fs.existsSync(bashDiffStateDir())).toBe(false);
+  });
+
+  // Regression (F3): the record was moved out from under a live repo-synapse viewer, whose
+  // own restore then found nothing and left bashEditDiffEnabled on for good.
+  it('while a repo-synapse owner is alive its record is shared in place: dead owners dropped, nothing migrated', async () => {
+    const a = gitRepo();
+    const b = gitRepo();
+    const c = gitRepo();
+    const original = '{"a":1}';
+    const file = writeLegacyRegistry(original, [
+      { repo: a, pid: process.pid },
+      { repo: b, pid: DEAD_PID },
+    ]);
+    expect(await enableBashEditDiff({ repoRoot: c, pid: DEAD_PID + 1 })).toMatchObject({ changed: false, reason: 'shared', previous: { present: false } });
+    expect(readBashDiffState()).toBeNull();
+    expect(readLegacyBashDiffState()?.owners).toEqual([
+      { repo: a, pid: process.pid },
+      { repo: c, pid: DEAD_PID + 1 },
+    ]);
+    // The legacy viewer is still live: the key stays on for it, and its record stays where it looks.
+    expect(await restoreBashEditDiff({ repoRoot: c })).toMatchObject({ status: 'in-use' });
+    expect(readJson(file).bashEditDiffEnabled).toBe(true);
+    expect(readLegacyBashDiffState()?.owners).toEqual([{ repo: a, pid: process.pid }]);
+    // Same format, same rules: this stands for the legacy viewer's own restore on exit.
+    expect(await restoreBashEditDiff({ repoRoot: a })).toMatchObject({ status: 'restored' });
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    expect(fs.existsSync(legacyBashDiffStateDir())).toBe(false);
+  });
+
+  it('a repo-synapse record with only dead owners is migrated by enable', async () => {
+    const a = gitRepo();
+    const original = '{"a":1}';
+    const file = writeLegacyRegistry(original, [{ repo: a, pid: DEAD_PID }]);
+    expect(await enableBashEditDiff({ repoRoot: a })).toMatchObject({ changed: false, reason: 'shared' });
+    expect(fs.existsSync(legacyBashDiffStateDir())).toBe(false);
+    expect(readBashDiffState()?.owners).toEqual([{ repo: a, pid: process.pid }]);
+    expect(await restoreBashEditDiff({ repoRoot: a })).toMatchObject({ status: 'restored' });
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+  });
+
+  it('a repo-synapse record joins a current one instead of replacing it', async () => {
+    const a = gitRepo();
+    const b = gitRepo();
+    const file = path.join(cfgDir, 'settings.json');
+    fs.writeFileSync(file, '{"x":1}');
+    await enableBashEditDiff({ repoRoot: a });
+    const dir = legacyBashDiffStateDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'bash-diff.json'),
+      JSON.stringify({ version: 1, settingsPath: file, previous: { present: true, value: false }, owners: [{ repo: b, pid: process.pid }] }),
+    );
+    expect(await restoreBashEditDiff({ repoRoot: a })).toMatchObject({ status: 'in-use' });
+    expect(readBashDiffState()).toMatchObject({ previous: { present: false }, owners: [{ repo: b, pid: process.pid }] });
+    // Its viewer is alive: the legacy record stays for its own restore.
+    expect(fs.existsSync(path.join(dir, 'bash-diff.json'))).toBe(true);
+    expect(await restoreBashEditDiff({ repoRoot: b })).toMatchObject({ status: 'restored' });
+    expect(fs.readFileSync(file, 'utf8')).toBe('{"x":1}');
   });
 
   it('two viewers on different repos: the key stays on until the last one exits', async () => {
@@ -529,7 +776,7 @@ describe('checkEnvironment', () => {
     const repo = gitRepo();
     await installHooks({ repoRoot: repo, port: 7801 });
     updateManifest(repo, { port: 7801 });
-    fs.writeFileSync(path.join(repo, '.repo-synapse', 'lock'), JSON.stringify({ pid: 2 ** 22 + 12345 }));
+    fs.writeFileSync(path.join(repo, '.neurons', 'lock'), JSON.stringify({ pid: 2 ** 22 + 12345 }));
     fs.writeFileSync(
       path.join(cfgDir, 'settings.json'),
       JSON.stringify({ allowedHttpHookUrls: ['https://hooks.example.com/*'], disableAllHooks: true }),
@@ -555,8 +802,18 @@ describe('checkEnvironment', () => {
     }
   });
 
+  it('reports hooks left by a repo-synapse version', () => {
+    const repo = gitRepo();
+    writeLocal(repo, JSON.stringify(legacyMerged({}, 7777)));
+    const r = checkEnvironmentSync(repo);
+    expect(r.installedPorts).toEqual([]);
+    expect(r.legacyPorts).toEqual([7777]);
+    expect(r.checks.find((c) => c.id === 'legacy-hooks')).toMatchObject({ status: 'warn' });
+  });
+
   it('matches allowlist patterns and NO_PROXY entries', () => {
-    expect(urlPatternMatches('http://127.0.0.1:*/hook?src=repo-synapse', hookUrl(7777))).toBe(true);
+    expect(urlPatternMatches('http://127.0.0.1:*/hook?src=neurons', hookUrl(7777))).toBe(true);
+    expect(urlPatternMatches('http://127.0.0.1:*/hook?src=repo-synapse', hookUrl(7777))).toBe(false);
     expect(urlPatternMatches('http://localhost:*', hookUrl(7777))).toBe(false);
     expect(urlPatternMatches('http://127.0.0.1:7777/hook', hookUrl(7777))).toBe(false);
     expect(urlPatternMatches('http://127.0.0.1:*/*', hookUrl(7777))).toBe(true);
@@ -586,12 +843,12 @@ describe('acquireLockSync', () => {
   }
 
   function lockFiles(repo: string): string[] {
-    return fs.readdirSync(path.join(repo, '.repo-synapse')).filter((f) => f.startsWith('lock')).sort();
+    return fs.readdirSync(path.join(repo, '.neurons')).filter((f) => f.startsWith('lock')).sort();
   }
 
   function writeLock(repo: string, v: unknown): string {
-    fs.mkdirSync(path.join(repo, '.repo-synapse'), { recursive: true });
-    const file = path.join(repo, '.repo-synapse', 'lock');
+    fs.mkdirSync(path.join(repo, '.neurons'), { recursive: true });
+    const file = path.join(repo, '.neurons', 'lock');
     fs.writeFileSync(file, JSON.stringify(v) + '\n');
     return file;
   }
@@ -599,7 +856,7 @@ describe('acquireLockSync', () => {
   it('creates the lock with pid, start time and script, and takes over a dead one', () => {
     const repo = gitRepo();
     expect(acquireLockSync(repo)).toEqual({ ok: true });
-    const file = path.join(repo, '.repo-synapse', 'lock');
+    const file = path.join(repo, '.neurons', 'lock');
     const own = JSON.parse(fs.readFileSync(file, 'utf8'));
     expect(own).toMatchObject({ pid: process.pid, cmd: process.argv[1] });
     expect(Number.isFinite(Date.parse(own.startedAt))).toBe(true);
@@ -626,8 +883,32 @@ describe('acquireLockSync', () => {
     await new Promise((r) => setTimeout(r, 100));
     const old = '2001-01-01T00:00:00.000Z';
     expect(lockStatus(Buffer.from(JSON.stringify({ pid: k.pid, startedAt: old })))).toEqual({ pid: k.pid, alive: false });
-    expect(lockStatus(Buffer.from(JSON.stringify({ pid: k.pid, startedAt: old, cmd: 'setTimeout' })))).toEqual({ pid: k.pid, alive: true });
+    expect(lockStatus(Buffer.from(JSON.stringify({ pid: k.pid, startedAt: old, cmd: process.execPath })))).toEqual({ pid: k.pid, alive: true });
     expect(lockStatus(Buffer.from(JSON.stringify({ pid: k.pid, startedAt: old, cmd: '/nowhere/cli.mjs' })))).toEqual({ pid: k.pid, alive: false });
+    // A recorded command line is compared exactly (a relative launch: argv[1] is absolute).
+    const line = processCommand(k.pid!);
+    expect(lockStatus(Buffer.from(JSON.stringify({ pid: k.pid, startedAt: old, cmd: '/abs/src/cli.ts', command: line })))).toEqual({ pid: k.pid, alive: true });
+    expect(lockStatus(Buffer.from(JSON.stringify({ pid: k.pid, startedAt: old, cmd: process.execPath, command: 'node other.mjs' })))).toEqual({ pid: k.pid, alive: false });
+  });
+
+  it('a lock written through one bin name still matches a run through another', () => {
+    expect(commandRunsScript('node /opt/bin/neu start', '/opt/bin/neu')).toBe(true);
+    expect(commandRunsScript('node /opt/bin/neu start', '/opt/bin/repo-synapse')).toBe(true);
+    expect(commandRunsScript('node /opt/bin/repo-synapse start', '/opt/bin/neurons')).toBe(true);
+    expect(commandRunsScript('node /opt/bin/neu start', '/usr/bin/repo-synapse')).toBe(false);
+    expect(commandRunsScript('node /opt/bin/neu start', '/opt/bin/other')).toBe(false);
+    expect(commandRunsScript('node /x/dist/cli.mjs start', '/x/dist/cli.mjs')).toBe(true);
+    expect(commandRunsScript('node /x/dist/cli.mjs', '/x/dist/cli.mjs')).toBe(true);
+  });
+
+  // Regression (F1): a substring match took another program for the viewer.
+  it('the script path must be a whole argument, not the prefix of another path', () => {
+    expect(commandRunsScript('node /usr/local/bin/neutron serve', '/usr/local/bin/neu')).toBe(false);
+    expect(commandRunsScript('node /usr/local/bin/neural-cli', '/usr/local/bin/neurons')).toBe(false);
+    expect(commandRunsScript('node /opt/app/dist/cli.js.bak', '/opt/app/dist/cli.js')).toBe(false);
+    expect(commandRunsScript('node /other/opt/app/dist/cli.js', '/opt/app/dist/cli.js')).toBe(false);
+    expect(commandRunsScript('/usr/local/bin/neu', '/usr/local/bin/neu')).toBe(true);
+    expect(commandRunsScript('node\t/usr/local/bin/neurons\tstart', '/usr/local/bin/neu')).toBe(true);
   });
 
   // Regression (F8 follow-up): the takeover moved the lock aside before checking it, so a
@@ -676,7 +957,7 @@ describe('acquireLockSync', () => {
       const results = await Promise.all(runs);
       const winners = results.filter((x) => x.r.ok);
       expect(winners).toHaveLength(1);
-      expect(JSON.parse(fs.readFileSync(path.join(repo, '.repo-synapse', 'lock'), 'utf8')).pid).toBe(winners[0]!.pid);
+      expect(JSON.parse(fs.readFileSync(path.join(repo, '.neurons', 'lock'), 'utf8')).pid).toBe(winners[0]!.pid);
       expect(lockFiles(repo)).toEqual(['lock']);
     }
   }, 30_000);

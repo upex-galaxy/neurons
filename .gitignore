@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.neurons/
 .repo-synapse/
 test-results/
 playwright-report/

@@ -87,6 +87,11 @@ export interface SessionInfo {
   firstSeen: number;
   lastSeen: number;
   ended: boolean;
+  /**
+   * Ended by `/clear` (SessionEnd reason "clear"): Claude Code went on in the same window
+   * under a new session id, so this one no longer counts as a separate active session.
+   */
+  cleared?: boolean;
   /** agentId -> agentType for subagents seen in this session. */
   agents: Record<string, string>;
 }
@@ -104,7 +109,7 @@ export type ServerMessage =
   | { type: 'tree'; added: TreeEntry[]; removed: string[] }
   | { type: 'sessions'; sessions: SessionInfo[] };
 
-/** Recorded line in .repo-synapse/events.jsonl. */
+/** Recorded line in .neurons/events.jsonl. */
 export type LogLine =
   | { kind: 'tree'; ts: number; tree: TreeSnapshot }
   | { kind: 'event'; event: VizEvent }
@@ -133,5 +138,9 @@ export const ACTION_COLORS: Record<Action, string> = {
 export const FAIL_COLOR = '#6b7280';
 export const EXTERNAL_COLOR = '#475569';
 
-export const HOOK_QUERY_MARKER = 'src=repo-synapse';
+export const HOOK_QUERY_MARKER = 'src=neurons';
+/** Per-repo state dir (events.jsonl, lock, install manifest and backup). */
+export const STATE_DIR_NAME = '.neurons';
+/** State dir of the versions named repo-synapse: read for replay and migrated, never written. */
+export const LEGACY_STATE_DIR_NAME = '.repo-synapse';
 export const DEFAULT_PORT = 7777;

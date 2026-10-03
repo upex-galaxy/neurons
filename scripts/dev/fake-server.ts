@@ -25,7 +25,7 @@ import type {
   VizEvent,
 } from '../../src/shared/types.ts';
 
-const SKIP = new Set(['node_modules', '.git', 'dist', '.repo-synapse']);
+const SKIP = new Set(['node_modules', '.git', 'dist', '.neurons', '.repo-synapse']);
 const FILE_CAP = 5000;
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -41,7 +41,7 @@ interface Args {
   dir: string;
   port: number;
   interval: number;
-  /** Send hello with mode "replay" (like `repo-synapse replay`). */
+  /** Send hello with mode "replay" (like `neu replay`). */
   replay: boolean;
   /** Do not send live events (useful for fps measurements). */
   quiet: boolean;
@@ -184,6 +184,8 @@ class Scenario {
     const claudeMd = this.files.find((f) => basename(f) === 'CLAUDE.md') ?? this.files.find((f) => f.endsWith('.md'));
     return [
       () => [ev('turn_start', 'info', [], { detail: 'Revisá el módulo y agregá un endpoint', promptId: `p-${this.loop}` })],
+      // Second session on the same repo (a parallel terminal): main-agent events only.
+      () => [ev('turn_start', 'info', [], { sessionId: SESSION_2, detail: 'Corré los tests y arreglá lo que falle' })],
       () => {
         const dir = this.pick(this.dirs, 1);
         return [
@@ -199,6 +201,13 @@ class Scenario {
         return [ev('read', 'pre', [f], { toolName: 'Read' }), ev('read', 'post', [f], { toolName: 'Read' })];
       },
       () => (claudeMd ? [ev('context_load', 'info', [claudeMd], { detail: 'nested_traversal' })] : []),
+      () => {
+        const f = this.deepFile(16);
+        return [
+          ev('edit', 'pre', [f], { toolName: 'Edit', sessionId: SESSION_2 }),
+          ev('edit', 'post', [f], { toolName: 'Edit', sessionId: SESSION_2 }),
+        ];
+      },
       () => {
         const f = this.deepFile(4);
         return [ev('edit', 'pre', [f], { toolName: 'Edit' }), ev('edit', 'post', [f], { toolName: 'Edit' })];
@@ -217,6 +226,10 @@ class Scenario {
         return [ev('read', 'post', [f], { toolName: 'Read', agentId: AGENT_ID, agentType: AGENT_TYPE })];
       },
       () => [ev('subagent_stop', 'info', [], { agentId: AGENT_ID, agentType: AGENT_TYPE })],
+      () => {
+        const dir = this.pick(this.dirs, 17);
+        return [ev('search', 'post', [dir], { toolName: 'Grep', sessionId: SESSION_2, secondary: this.filesIn(dir).slice(0, 4) })];
+      },
       () => {
         const f = this.deepFile(8);
         return [
@@ -253,7 +266,7 @@ class Scenario {
         }),
       ],
       () => [
-        ev('read', 'post', [], { toolName: 'Read', outsideRepo: [`/tmp/repo-synapse-demo/out-${this.loop % 3}.log`] }),
+        ev('read', 'post', [], { toolName: 'Read', outsideRepo: [`/tmp/neurons-demo/out-${this.loop % 3}.log`] }),
         ev('bash', 'post', [], { toolName: 'Bash', outsideRepo: ['/private/tmp/build/cache.json'], detail: 'ls /private/tmp/build' }),
       ],
       () => [ev('subagent_start', 'info', [], { agentId: AGENT_2, agentType: AGENT_2_TYPE })],
@@ -266,7 +279,10 @@ class Scenario {
         ];
       },
       () => [ev('subagent_stop', 'info', [], { agentId: AGENT_2, agentType: AGENT_2_TYPE })],
-      () => [ev('read', 'post', [this.deepFile(15)], { toolName: 'Read', sessionId: SESSION_2 })],
+      () => [
+        ev('read', 'post', [this.deepFile(15)], { toolName: 'Read', sessionId: SESSION_2 }),
+        ev('read', 'post', [this.deepFile(18)], { toolName: 'Read', sessionId: SESSION_2 }),
+      ],
       () => {
         const files = [this.deepFile(10), this.deepFile(11), this.deepFile(12)];
         return files.map((f) => ev('read', 'post', [f], { toolName: 'Read' }));

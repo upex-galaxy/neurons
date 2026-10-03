@@ -8,7 +8,7 @@ import { defineConfig, devices } from '@playwright/test';
 import { E2E_PORTS as PORTS } from './scripts/e2e/fixtures.mjs';
 
 // Workers load this file again: the env var keeps one temp root per run.
-process.env.RS_E2E_DIR ??= path.join(fs.realpathSync(os.tmpdir()), `repo-synapse-e2e-${process.pid}`);
+process.env.RS_E2E_DIR ??= path.join(fs.realpathSync(os.tmpdir()), `neurons-e2e-${process.pid}`);
 
 function server(mode: keyof typeof PORTS) {
   return {

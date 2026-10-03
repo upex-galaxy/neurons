@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Creates the small demo repository used by docs/DEMO.md.
-# Usage: scripts/make-demo-repo.sh [target-dir]   (default: ~/repo-synapse-demo)
+# Usage: scripts/make-demo-repo.sh [target-dir]   (default: ~/neurons-demo)
 set -euo pipefail
 
-TARGET="${1:-$HOME/repo-synapse-demo}"
+TARGET="${1:-$HOME/neurons-demo}"
 if [ -e "$TARGET" ]; then
   echo "Ya existe: $TARGET (borralo o elegí otra ruta)" >&2
   exit 1
@@ -15,7 +15,7 @@ cd "$TARGET"
 cat > CLAUDE.md <<'EOF'
 # Tienda demo
 
-API mínima de una tienda en TypeScript. Sirve para ver en repo-synapse cómo se mueve Claude Code.
+API mínima de una tienda en TypeScript. Sirve para ver en Neurons cómo se mueve Claude Code.
 
 - Código en `src/`, pruebas en `tests/`.
 - Los precios se manejan en centavos (`number` entero).
@@ -109,7 +109,7 @@ EOF
 cat > README.md <<'EOF'
 # Tienda demo
 
-Repo de ejemplo para repo-synapse.
+Repo de ejemplo para Neurons.
 EOF
 
 cat > package.json <<'EOF'

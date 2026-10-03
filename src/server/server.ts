@@ -15,13 +15,14 @@ import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type {
-  LogLine,
-  ServerMessage,
-  SessionInfo,
-  TreeEntry,
-  TreeSnapshot,
-  VizEvent,
+import {
+  STATE_DIR_NAME,
+  type LogLine,
+  type ServerMessage,
+  type SessionInfo,
+  type TreeEntry,
+  type TreeSnapshot,
+  type VizEvent,
 } from '../shared/types.ts';
 import { Attributor, type Attribution, type DiskChange, type Owner } from './attribution.ts';
 import { EventLog, readLog } from './eventlog.ts';
@@ -30,7 +31,7 @@ import { createPathResolver } from './paths.ts';
 import { isExcludedRel, isGitIgnored, scanTree, TreeIndex } from './tree.ts';
 import { startWatcher, type WatcherHandle } from './watcher.ts';
 
-export interface SynapseServerOptions {
+export interface NeuronsServerOptions {
   root: string;
   port: number;
   host?: string;
@@ -39,11 +40,11 @@ export interface SynapseServerOptions {
   mode: 'live' | 'replay';
   /** Static web UI dir. Default: dist/web resolved from this module. */
   webDir?: string;
-  /** Live mode log. Default: <root>/.repo-synapse/events.jsonl. */
+  /** Live mode log. Default: <root>/.neurons/events.jsonl. */
   logFile?: string;
   /** Watch the disk (live mode only). Default true. */
   watch?: boolean;
-  /** Replay mode source. Default: <root>/.repo-synapse/events.jsonl. */
+  /** Replay mode source. Default: <root>/.neurons/events.jsonl. */
   replayFile?: string;
   now?: () => number;
   /** Watcher coalescing window (ms). */
@@ -53,12 +54,13 @@ export interface SynapseServerOptions {
   /**
    * Extra browser origins allowed on /ws and /hook besides the server's own
    * (http://127.0.0.1:<port> and http://localhost:<port>), e.g. the Vite dev server.
-   * Also read from REPO_SYNAPSE_ALLOWED_ORIGINS (comma separated).
+   * Also read from NEURONS_ALLOWED_ORIGINS (comma separated; the legacy
+   * REPO_SYNAPSE_ALLOWED_ORIGINS is still accepted).
    */
   allowedOrigins?: string[];
 }
 
-export interface SynapseServer {
+export interface NeuronsServer {
   port: number;
   url: string;
   close(): Promise<void>;
@@ -92,7 +94,7 @@ const MIME: Record<string, string> = {
 
 const FILE_CHANGE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
-/** The hooks file `repo-synapse start` writes right after the server is up. */
+/** The hooks file `neu start` writes right after the server is up. */
 const OWN_SETTINGS = '.claude/settings.local.json';
 /** Its atomic-write temp file (src/install/settings.ts). */
 const OWN_SETTINGS_TEMP = /^\.claude\/\.settings\.local\.json\.\d+\.[0-9a-f]+\.tmp$/;
@@ -119,9 +121,9 @@ function normalizeOrigin(origin: string): string | undefined {
   }
 }
 
-/** The server's own origins plus the extra ones from options and REPO_SYNAPSE_ALLOWED_ORIGINS. */
+/** The server's own origins plus the extra ones from options, NEURONS_ALLOWED_ORIGINS and the legacy REPO_SYNAPSE_ALLOWED_ORIGINS. */
 export function allowedOriginSet(port: number, extra: readonly string[] = []): Set<string> {
-  const fromEnv = (process.env.REPO_SYNAPSE_ALLOWED_ORIGINS ?? '').split(',');
+  const fromEnv = [process.env.NEURONS_ALLOWED_ORIGINS, process.env.REPO_SYNAPSE_ALLOWED_ORIGINS].flatMap((v) => (v ?? '').split(','));
   const set = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
   for (const o of [...extra, ...fromEnv]) {
     const n = o.trim() === '' ? undefined : normalizeOrigin(o.trim());
@@ -176,10 +178,18 @@ function isBashGuess(p: HookPayload, ev: VizEvent): boolean {
   return (ev.action === 'delete' || ev.action === 'move' || ev.action === 'create') && !hasBashEditDiff(p);
 }
 
-/** Sessions rebuilt from logged events (replay mode). */
+/**
+ * Sessions rebuilt from logged events (replay mode). A 'tree' line starts a new server run:
+ * the hooks were gone in between, so a session the previous run never saw end is ended
+ * there (a session that goes on gets a new session_start in the next run).
+ */
 function sessionsFromLog(lines: LogLine[]): SessionInfo[] {
   const map = new Map<string, SessionInfo>();
   for (const line of lines) {
+    if (line.kind === 'tree') {
+      for (const s of map.values()) s.ended = true;
+      continue;
+    }
     if (line.kind !== 'event' || line.event.source !== 'hook') continue;
     const e = line.event;
     let s = map.get(e.sessionId);
@@ -188,8 +198,14 @@ function sessionsFromLog(lines: LogLine[]): SessionInfo[] {
       map.set(e.sessionId, s);
     }
     s.lastSeen = Math.max(s.lastSeen, e.ts);
-    if (e.action === 'session_end') s.ended = true;
-    else if (e.action === 'session_start') s.ended = false;
+    if (e.action === 'session_end') {
+      s.ended = true;
+      if (e.detail === 'clear') s.cleared = true;
+      else delete s.cleared;
+    } else if (e.action === 'session_start') {
+      s.ended = false;
+      delete s.cleared;
+    }
     if (e.agentId) s.agents[e.agentId] = e.agentType ?? s.agents[e.agentId] ?? '';
   }
   return [...map.values()];
@@ -197,7 +213,7 @@ function sessionsFromLog(lines: LogLine[]): SessionInfo[] {
 
 function sessionsSignature(sessions: SessionInfo[]): string {
   return JSON.stringify(
-    sessions.map((s) => [s.sessionId, s.ended, Object.entries(s.agents).sort()]),
+    sessions.map((s) => [s.sessionId, s.ended, s.cleared === true, Object.entries(s.agents).sort()]),
   );
 }
 
@@ -243,12 +259,12 @@ function listen(server: http.Server, port: number, host: string): Promise<void> 
 
 // ---------------------------------------------------------------- server
 
-export async function startSynapseServer(o: SynapseServerOptions): Promise<SynapseServer> {
+export async function startNeuronsServer(o: NeuronsServerOptions): Promise<NeuronsServer> {
   const host = o.host ?? '127.0.0.1';
   const now = o.now ?? Date.now;
   const onError = o.onError ?? (() => {});
   const live = o.mode === 'live';
-  const defaultLog = path.join(path.resolve(o.root), '.repo-synapse', 'events.jsonl');
+  const defaultLog = path.join(path.resolve(o.root), STATE_DIR_NAME, 'events.jsonl');
   const webDir = o.webDir ?? defaultWebDir();
 
   // --- state
@@ -272,7 +288,7 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
     const resolver = createPathResolver(snapshot.root);
     normalizer = new Normalizer({ resolver, index, now });
     attributor = new Attributor({ now, resolver });
-    log = new EventLog(o.logFile ?? path.join(snapshot.root, '.repo-synapse', 'events.jsonl'), { now });
+    log = new EventLog(o.logFile ?? path.join(snapshot.root, STATE_DIR_NAME, 'events.jsonl'), { now });
     log.writeTree(snapshot);
   } else {
     replayFile = o.replayFile ?? defaultLog;
@@ -713,7 +729,7 @@ export async function startSynapseServer(o: SynapseServerOptions): Promise<Synap
   const address = server.address();
   const actualPort = typeof address === 'object' && address !== null ? address.port : port;
   allowedOrigins = allowedOriginSet(actualPort, o.allowedOrigins);
-  // `repo-synapse start` installs its hooks into OWN_SETTINGS as soon as this resolves.
+  // `neu start` installs its hooks into OWN_SETTINGS as soon as this resolves.
   // That write is the viewer's own doing, never a change to show (the tree still gets it).
   if (watcher) attributor?.noteReported([OWN_SETTINGS], undefined, { ms: OWN_WRITE_MS });
   const urlHost = host.includes(':') ? `[${host}]` : host;

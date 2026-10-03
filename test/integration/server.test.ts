@@ -9,7 +9,7 @@ import WebSocket from 'ws';
 import { readLog } from '../../src/server/eventlog.ts';
 import { Normalizer, parseHookPayload, type HookPayload } from '../../src/server/normalize.ts';
 import { createPathResolver } from '../../src/server/paths.ts';
-import { startSynapseServer, type SynapseServer, type SynapseServerOptions } from '../../src/server/server.ts';
+import { allowedOriginSet, startNeuronsServer, type NeuronsServer, type NeuronsServerOptions } from '../../src/server/server.ts';
 import { TreeIndex, scanTree } from '../../src/server/tree.ts';
 import type { LogLine, ServerMessage, TreeSnapshot, VizEvent } from '../../src/shared/types.ts';
 
@@ -31,7 +31,7 @@ const PROBE_FILES: Record<string, string> = {
 };
 
 const tmpDirs: string[] = [];
-const servers: SynapseServer[] = [];
+const servers: NeuronsServer[] = [];
 const sockets: WebSocket[] = [];
 let webDir: string;
 
@@ -41,7 +41,7 @@ beforeAll(() => {
   process.env.CLAUDE_CONFIG_DIR = cfg;
   webDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-web-'));
   tmpDirs.push(webDir);
-  fs.writeFileSync(path.join(webDir, 'index.html'), '<!doctype html><title>Synapse</title>');
+  fs.writeFileSync(path.join(webDir, 'index.html'), '<!doctype html><title>Neurons</title>');
   fs.mkdirSync(path.join(webDir, 'assets'));
   fs.writeFileSync(path.join(webDir, 'assets', 'app.js'), 'console.log(1);');
   fs.writeFileSync(path.join(webDir, 'assets', 'app.css'), 'body{}');
@@ -101,17 +101,17 @@ async function waitFor(pred: () => boolean, timeout = 3000, what = 'condition'):
 
 interface Env {
   repo: string;
-  server: SynapseServer;
+  server: NeuronsServer;
   logFile: string;
 }
 
-async function start(opts: Partial<SynapseServerOptions> = {}): Promise<Env> {
+async function start(opts: Partial<NeuronsServerOptions> = {}): Promise<Env> {
   const repo = opts.root ?? makeRepo();
-  const server = await startSynapseServer({ root: repo, port: 0, mode: 'live', webDir, ...opts });
+  const server = await startNeuronsServer({ root: repo, port: 0, mode: 'live', webDir, ...opts });
   servers.push(server);
   // Let FSEvents open its stream before the tests touch the disk.
   if (opts.mode !== 'replay' && opts.watch !== false) await sleep(150);
-  return { repo, server, logFile: path.join(fs.realpathSync(repo), '.repo-synapse', 'events.jsonl') };
+  return { repo, server, logFile: path.join(fs.realpathSync(repo), '.neurons', 'events.jsonl') };
 }
 
 interface Client {
@@ -146,7 +146,7 @@ async function connect(url: string, origin?: string): Promise<Client> {
 }
 
 async function post(url: string, body: string | object): Promise<{ status: number; text: string; length: string | null }> {
-  const res = await fetch(url + '/hook?src=repo-synapse', {
+  const res = await fetch(url + '/hook?src=neurons', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: typeof body === 'string' ? body : JSON.stringify(body),
@@ -667,7 +667,7 @@ describe('one event per real file change (hook vs watcher)', () => {
     expect(tree.entries.map((e) => e.path)).toEqual(['a.txt']);
   });
 
-  // Regression (F8): `repo-synapse start` installing its hooks showed up as an external create.
+  // Regression (F8): `neu start` installing its hooks showed up as an external create.
   it('its own settings.local.json write right after startup is not an event (the tree still shows it)', async () => {
     const repo = makePlainRepo({ 'a.txt': 'a' });
     const { server } = await start({ root: repo });
@@ -728,6 +728,22 @@ describe('WebSocket', () => {
     expect(status).toBe(404);
   });
 
+  it('reads extra origins from NEURONS_ALLOWED_ORIGINS and the legacy REPO_SYNAPSE_ALLOWED_ORIGINS', () => {
+    const saved = [process.env.NEURONS_ALLOWED_ORIGINS, process.env.REPO_SYNAPSE_ALLOWED_ORIGINS];
+    try {
+      process.env.NEURONS_ALLOWED_ORIGINS = 'http://localhost:5173, bad origin';
+      process.env.REPO_SYNAPSE_ALLOWED_ORIGINS = 'http://localhost:4000/';
+      expect([...allowedOriginSet(7777)].sort()).toEqual(
+        ['http://127.0.0.1:7777', 'http://localhost:4000', 'http://localhost:5173', 'http://localhost:7777'].sort(),
+      );
+    } finally {
+      for (const [k, v] of [['NEURONS_ALLOWED_ORIGINS', saved[0]], ['REPO_SYNAPSE_ALLOWED_ORIGINS', saved[1]]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
   it('sends recent events in hello to late clients', async () => {
     const { server } = await start({ watch: false });
     await post(server.url, { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'hola' });
@@ -758,14 +774,14 @@ describe('HTTP routes', () => {
 
     const index = await get('/');
     expect(index.headers.get('content-type')).toContain('text/html');
-    expect(await index.text()).toContain('<title>Synapse</title>');
+    expect(await index.text()).toContain('<title>Neurons</title>');
     const js = await get('/assets/app.js');
     expect(js.headers.get('content-type')).toContain('text/javascript');
     const css = await get('/assets/app.css');
     expect(css.headers.get('content-type')).toContain('text/css');
     const spa = await get('/some/client/route');
     expect(spa.status).toBe(200);
-    expect(await spa.text()).toContain('Synapse');
+    expect(await spa.text()).toContain('Neurons');
 
     const traversal = await get('/..%2f..%2fetc%2fpasswd');
     expect(await traversal.text()).not.toContain('root:');
@@ -799,7 +815,7 @@ describe('HTTP routes', () => {
       expect(server.port).toBeGreaterThan(busy);
       expect(server.port).toBeLessThanOrEqual(busy + 20);
       expect(server.url).toBe(`http://127.0.0.1:${server.port}`);
-      await expect(startSynapseServer({ root: repo, port: busy, portStrict: true, mode: 'live', watch: false, logFile: path.join(repo, 'x.jsonl') })).rejects.toMatchObject({ code: 'EADDRINUSE' });
+      await expect(startNeuronsServer({ root: repo, port: busy, portStrict: true, mode: 'live', watch: false, logFile: path.join(repo, 'x.jsonl') })).rejects.toMatchObject({ code: 'EADDRINUSE' });
     } finally {
       await new Promise<void>((r) => blocker.close(() => r()));
     }
@@ -833,5 +849,26 @@ describe('replay mode', () => {
     expect(client.events()).toEqual([]);
     const after = (await (await fetch(server.url + '/api/log')).json()) as LogLine[];
     expect(after).toHaveLength(3);
+  });
+
+  // Regression: a session open when a run closed stayed active for the rest of the log.
+  it('a new server run in the log ends the sessions the previous one left open', async () => {
+    const first = await start({ watch: false });
+    await post(first.server.url, { hook_event_name: 'UserPromptSubmit', session_id: 'a', prompt: 'uno' });
+    await sleep(50);
+    await first.server.close();
+    servers.splice(servers.indexOf(first.server), 1);
+    const second = await start({ root: first.repo, watch: false });
+    await post(second.server.url, { hook_event_name: 'UserPromptSubmit', session_id: 'b', prompt: 'dos' });
+    await sleep(50);
+    await second.server.close();
+    servers.splice(servers.indexOf(second.server), 1);
+
+    const { server } = await start({ root: first.repo, mode: 'replay', replayFile: first.logFile });
+    const client = await connect(server.url);
+    const hello = client.messages[0];
+    if (hello?.type !== 'hello') throw new Error('no hello');
+    const byId = Object.fromEntries(hello.sessions.map((s) => [s.sessionId, s.ended]));
+    expect(byId).toEqual({ a: true, b: false });
   });
 });

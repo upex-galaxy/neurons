@@ -3,13 +3,13 @@
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { NodeKind, TreeEntry, TreeSnapshot } from '../shared/types.ts';
+import { LEGACY_STATE_DIR_NAME, STATE_DIR_NAME, type NodeKind, type TreeEntry, type TreeSnapshot } from '../shared/types.ts';
 import { toPosix } from './paths.ts';
 
-export const DEFAULT_EXCLUDES = ['.git', 'node_modules', '.repo-synapse', 'dist', 'build'];
+export const DEFAULT_EXCLUDES = ['.git', 'node_modules', STATE_DIR_NAME, LEGACY_STATE_DIR_NAME, 'dist', 'build'];
 
 /** Excluded even in git repos (git ls-files already applies .gitignore for the rest). */
-const ALWAYS_EXCLUDED = ['.git', '.repo-synapse'];
+const ALWAYS_EXCLUDED = ['.git', STATE_DIR_NAME, LEGACY_STATE_DIR_NAME];
 
 const DEFAULT_MAX_FILES = 50_000;
 
@@ -22,7 +22,7 @@ export function isExcludedRel(rel: string): boolean {
   return segments(rel).some((s) => DEFAULT_EXCLUDES.includes(s));
 }
 
-/** True when any segment of `rel` is `.git` or `.repo-synapse`. */
+/** True when any segment of `rel` is `.git`, `.neurons` or the legacy `.repo-synapse`. */
 export function isAlwaysExcluded(rel: string): boolean {
   return segments(rel).some((s) => ALWAYS_EXCLUDED.includes(s));
 }

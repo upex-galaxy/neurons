@@ -1,4 +1,4 @@
-// `repo-synapse replay` on a log recorded by the real server (scripts/e2e/serve.mjs posts
+// `neu replay` on a log recorded by the real server (scripts/e2e/serve.mjs posts
 // the run1 payloads 200 ms apart, so the timeline lasts about 8 s at 1x).
 import { expect, test } from '@playwright/test';
 import { E2E_PORTS } from '../../scripts/e2e/fixtures.mjs';

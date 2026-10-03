@@ -43,7 +43,7 @@ const paths = (s: TreeSnapshot) => s.entries.map((e) => `${e.kind === 'dir' ? 'd
 
 describe('exclusion helpers', () => {
   it('isExcludedRel matches any DEFAULT_EXCLUDES segment', () => {
-    expect(DEFAULT_EXCLUDES).toEqual(['.git', 'node_modules', '.repo-synapse', 'dist', 'build']);
+    expect(DEFAULT_EXCLUDES).toEqual(['.git', 'node_modules', '.neurons', '.repo-synapse', 'dist', 'build']);
     expect(isExcludedRel('node_modules/x/index.js')).toBe(true);
     expect(isExcludedRel('packages/a/dist/index.js')).toBe(true);
     expect(isExcludedRel('.git')).toBe(true);
@@ -51,9 +51,11 @@ describe('exclusion helpers', () => {
     expect(isExcludedRel('')).toBe(false);
   });
 
-  it('isAlwaysExcluded only matches .git and .repo-synapse', () => {
+  it('isAlwaysExcluded only matches .git, .neurons and the legacy .repo-synapse', () => {
     expect(isAlwaysExcluded('.git/HEAD')).toBe(true);
-    expect(isAlwaysExcluded('a/.repo-synapse/events.jsonl')).toBe(true);
+    expect(isAlwaysExcluded('a/.neurons/events.jsonl')).toBe(true);
+    expect(isAlwaysExcluded('.repo-synapse/events.jsonl')).toBe(true);
+    expect(isAlwaysExcluded('.neurons-notes/a.md')).toBe(false);
     expect(isAlwaysExcluded('node_modules/x')).toBe(false);
     expect(isAlwaysExcluded('dist/a.js')).toBe(false);
     expect(isAlwaysExcluded('.github/workflows/ci.yml')).toBe(false);
@@ -62,7 +64,7 @@ describe('exclusion helpers', () => {
 
 describe('scanTree (not a git repo)', () => {
   it('walks recursively with DEFAULT_EXCLUDES, derives dirs, sorts entries', async () => {
-    const dir = mkRepo(['b.txt', 'src/a.ts', 'src/utils/x.ts', 'node_modules/p/i.js', 'dist/o.js', 'build/o.js', '.repo-synapse/e.jsonl', '.claude/rules/api.md']);
+    const dir = mkRepo(['b.txt', 'src/a.ts', 'src/utils/x.ts', 'node_modules/p/i.js', 'dist/o.js', 'build/o.js', '.neurons/e.jsonl', '.repo-synapse/e.jsonl', '.claude/rules/api.md']);
     fs.mkdirSync(path.join(dir, 'empty'));
     const snap = await scanTree(dir);
     expect(snap.root).toBe(fs.realpathSync(dir));
@@ -90,8 +92,8 @@ describe('scanTree (not a git repo)', () => {
 });
 
 describe('scanTree (git repo)', () => {
-  it('uses git ls-files: honors .gitignore, includes untracked, drops deleted and .repo-synapse', async () => {
-    const dir = mkRepo(['.gitignore', 'src/a.ts', 'src/gone.ts', 'ignored/x.txt', 'app.log', 'dist/keep.js', 'new/untracked.ts', '.repo-synapse/events.jsonl']);
+  it('uses git ls-files: honors .gitignore, includes untracked, drops deleted, .neurons and .repo-synapse', async () => {
+    const dir = mkRepo(['.gitignore', 'src/a.ts', 'src/gone.ts', 'ignored/x.txt', 'app.log', 'dist/keep.js', 'new/untracked.ts', '.neurons/events.jsonl', '.repo-synapse/events.jsonl']);
     fs.writeFileSync(path.join(dir, '.gitignore'), 'ignored/\n*.log\n');
     git(dir, 'init', '-q');
     git(dir, 'add', '.gitignore', 'src/a.ts', 'src/gone.ts');
@@ -100,7 +102,7 @@ describe('scanTree (git repo)', () => {
     expect(paths(snap)).toEqual([
       'f:.gitignore',
       'd:dist',
-      'f:dist/keep.js', // not in .gitignore: git mode only drops .git/.repo-synapse
+      'f:dist/keep.js', // not in .gitignore: git mode only drops .git/.neurons/.repo-synapse
       'd:new',
       'f:new/untracked.ts',
       'd:src',

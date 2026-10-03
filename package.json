@@ -1,12 +1,12 @@
 {
-  "name": "repo-synapse",
-  "version": "0.1.0",
-  "description": "Live 3D view of what Claude Code reads, edits, creates and deletes in a repository, driven by Claude Code HTTP hooks.",
+  "name": "neurons-cli",
+  "version": "0.2.0",
+  "description": "Neurons: live 3D view of what Claude Code reads, edits, creates and deletes in a repository, driven by Claude Code HTTP hooks.",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "repo-synapse": "./dist/cli.mjs",
-    "neu": "./dist/cli.mjs"
+    "neu": "./dist/cli.mjs",
+    "neurons": "./dist/cli.mjs"
   },
   "files": [
     "dist"

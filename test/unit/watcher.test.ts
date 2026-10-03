@@ -297,9 +297,9 @@ describe('startWatcher', () => {
     expect(s.changes.map((c) => c.path)).not.toContain('tmp.txt');
   });
 
-  it('skips .git, .repo-synapse and, outside git, DEFAULT_EXCLUDES', async () => {
+  it('skips .git, .neurons, the legacy .repo-synapse and, outside git, DEFAULT_EXCLUDES', async () => {
     const s = await setup({ 'a.txt': 'a' });
-    for (const d of ['.git', '.repo-synapse', 'node_modules/pkg', 'dist', 'src/build']) {
+    for (const d of ['.git', '.neurons', '.repo-synapse', 'node_modules/pkg', 'dist', 'src/build']) {
       fs.mkdirSync(path.join(s.root, d), { recursive: true });
       fs.writeFileSync(path.join(s.root, d, 'f.txt'), 'x');
     }

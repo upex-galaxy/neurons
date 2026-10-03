@@ -404,9 +404,10 @@ describe('Normalizer: other rules', () => {
     expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'mcp__x__y', tool_input: { path: '/api/v1/users' } })))).toMatchObject({ action: 'tool', paths: [] });
   });
 
-  it('paths in .git or .repo-synapse are dropped', async () => {
+  it('paths in .git or .neurons are dropped', async () => {
     const { normalizer } = await makeNormalizer();
     expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: path.join(repo, '.git/config') } })))).toMatchObject({ action: 'read', paths: [] });
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '.neurons/events.jsonl' } }))).paths).toEqual([]);
     expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '.repo-synapse/events.jsonl' } }))).paths).toEqual([]);
   });
 
@@ -437,9 +438,15 @@ describe('Normalizer: other rules', () => {
     normalizer.normalize(ev({ hook_event_name: 'Stop' }));
     normalizer.normalize(ev({ hook_event_name: 'SessionEnd', reason: 'clear' }));
     expect(normalizer.sessions()[0]?.ended).toBe(true);
+    // /clear: the window goes on under a new session id (see SessionInfo.cleared).
+    expect(normalizer.sessions()[0]?.cleared).toBe(true);
     const evs = normalizer.normalize(ev({ hook_event_name: 'UserPromptSubmit', prompt: 'again' }));
     expect(evs.map((e) => e.action)).toEqual(['session_start', 'turn_start']);
     expect(normalizer.sessions()[0]?.ended).toBe(false);
+    expect(normalizer.sessions()[0]?.cleared).toBeUndefined();
+    normalizer.normalize(ev({ hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' }));
+    expect(normalizer.sessions()[0]).toMatchObject({ ended: true });
+    expect(normalizer.sessions()[0]?.cleared).toBeUndefined();
   });
 
   it('uses crypto.randomUUID and Date.now by default', async () => {
