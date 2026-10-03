@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { HOOK_EVENTS, hookUrl, isOwnHook } from '../../src/install/settings.ts';
+import { HOOK_EVENTS, hookUrl, isLegacyHook, isOwnHook, mergeHooks } from '../../src/install/settings.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = path.join(ROOT, 'dist', 'cli.mjs');
@@ -18,6 +18,8 @@ const FIXTURE = path.join(ROOT, 'test', 'fixtures', 'payloads', 'run1.jsonl');
 const tmpDirs: string[] = [];
 const children: ChildProcess[] = [];
 let xdgDir: string;
+/** NEURONS_HOME of every run that does not pass its own: never the real ~/.neurons. */
+let neuronsHome: string;
 
 function tmp(prefix: string): string {
   const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
@@ -40,6 +42,7 @@ beforeAll(() => {
     execFileSync(path.join(ROOT, 'node_modules', '.bin', 'tsdown'), [], { cwd: ROOT, stdio: 'ignore' });
   }
   xdgDir = tmp('rs-cli-xdg-');
+  neuronsHome = tmp('rs-cli-nhome-');
 }, 120_000);
 
 afterEach(() => {
@@ -77,15 +80,18 @@ interface Run {
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 }
 
-function run(args: string[], cfgDir: string): Run {
+/** `script`: the CLI path as given to node (default: the absolute dist/cli.mjs). */
+function run(args: string[], cfgDir: string, o: { cwd?: string; env?: NodeJS.ProcessEnv; script?: string } = {}): Run {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     CLAUDE_CONFIG_DIR: cfgDir,
+    NEURONS_HOME: neuronsHome,
     GIT_CONFIG_GLOBAL: '/dev/null',
     XDG_CONFIG_HOME: xdgDir,
+    ...o.env,
   };
   for (const k of ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy']) delete env[k];
-  const child = spawn(process.execPath, [CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [o.script ?? CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], ...(o.cwd ? { cwd: o.cwd } : {}) });
   children.push(child);
   let buf = '';
   const listeners = new Set<() => void>();
@@ -144,9 +150,27 @@ function ownUrls(file: string): Array<{ event: string; url: string }> {
   return out;
 }
 
+function legacyCount(file: string): number {
+  const s = JSON.parse(fs.readFileSync(file, 'utf8')) as { hooks?: Record<string, Array<{ hooks: unknown[] }>> };
+  return Object.values(s.hooks ?? {}).reduce((n, groups) => n + groups.reduce((m, g) => m + g.hooks.filter(isLegacyHook).length, 0), 0);
+}
+
+/** Leaves `repo` as an install by a repo-synapse version (hooks, backup, manifest) would. */
+function writeLegacyInstall(repo: string, original: string, port: number): void {
+  const dir = path.join(repo, '.repo-synapse');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'settings.local.json.bak'), original);
+  fs.writeFileSync(
+    path.join(dir, 'install.json'),
+    JSON.stringify({ version: 1, createdFile: false, createdClaudeDir: false, backedUpAt: '2026-09-30T12:00:00.000Z', port }),
+  );
+  const merged = JSON.stringify(mergeHooks(JSON.parse(original) as object, port), null, 2).replaceAll('?src=neurons', '?src=repo-synapse');
+  fs.writeFileSync(path.join(repo, '.claude', 'settings.local.json'), merged + '\n');
+}
+
 const READY = /escuchando en http:\/\/127\.0\.0\.1:(\d+)/;
 
-describe('repo-synapse CLI (dist/cli.mjs)', () => {
+describe('Neurons CLI (dist/cli.mjs)', () => {
   it('has a shebang and prints --version / --help', () => {
     expect(fs.readFileSync(CLI, 'utf8').startsWith('#!/usr/bin/env node\n')).toBe(true);
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as { version: string };
@@ -167,7 +191,7 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     const own = ownUrls(settings);
     expect(own.map((o) => o.event).sort()).toEqual([...HOOK_EVENTS].sort());
     expect(own.every((o) => o.url === hookUrl(actual))).toBe(true);
-    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'lock'))).toBe(true);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'lock'))).toBe(true);
     expect(fs.existsSync(path.join(cfg, 'settings.json'))).toBe(false);
 
     const res = await fetch(hookUrl(actual), {
@@ -183,9 +207,9 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     expect(code).toBe(0);
     expect(fs.existsSync(settings)).toBe(false);
     expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
-    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'lock'))).toBe(false);
-    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'install.json'))).toBe(false);
-    expect(fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain('/.repo-synapse/');
+    expect(fs.existsSync(path.join(repo, '.neurons', 'lock'))).toBe(false);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'install.json'))).toBe(false);
+    expect(fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain('/.neurons/');
   });
 
   it('start with bash diff toggles the user setting and restores both files byte for byte', async () => {
@@ -211,15 +235,19 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     expect(fs.readFileSync(localFile, 'utf8')).toBe(localOriginal);
   });
 
-  it('start --no-install keeps .repo-synapse/ out of git', async () => {
+  it('start --no-install keeps .neurons/ out of git', async () => {
     const repo = gitRepo();
     const cfg = tmp('rs-cli-cfg-');
     const r = run(['start', repo, '--no-open', '--port', '0', '--no-install'], cfg);
     await r.waitFor(READY);
-    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'events.jsonl'))).toBe(true);
-    expect(fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain('/.repo-synapse/');
+    // Nothing was installed, so the footer promises no cleanup.
+    await r.waitFor(/Ctrl\+C para salir/);
+    expect(r.output()).toContain('Ctrl+C para salir.');
+    expect(r.output()).not.toContain('los hooks se quitan al cerrar');
+    expect(fs.existsSync(path.join(repo, '.neurons', 'events.jsonl'))).toBe(true);
+    expect(fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain('/.neurons/');
     const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: repo, encoding: 'utf8' });
-    expect(status).not.toContain('.repo-synapse');
+    expect(status).not.toContain('.neurons');
     r.child.kill('SIGINT');
     expect((await r.exited).code).toBe(0);
   });
@@ -237,7 +265,7 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
       r.child.kill('SIGINT');
       expect((await r.exited).code).toBe(0);
       expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
-      expect(fs.existsSync(path.join(repo, '.repo-synapse', 'install.json'))).toBe(false);
+      expect(fs.existsSync(path.join(repo, '.neurons', 'install.json'))).toBe(false);
     } finally {
       fs.chmodSync(exclude, 0o644);
     }
@@ -260,8 +288,8 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
       fs.chmodSync(claudeDir, 0o755);
     }
     expect(fs.readFileSync(localFile, 'utf8')).toBe('{"a":1}');
-    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'install.json'))).toBe(false);
-    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'lock'))).toBe(false);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'install.json'))).toBe(false);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'lock'))).toBe(false);
   });
 
   it('an unwritable user config dir skips bash diff instead of aborting start', async () => {
@@ -312,12 +340,12 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     const second = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff'], cfg);
     const res = await second.exited;
     expect(res.code).toBe(1);
-    expect(second.output()).toContain('Ya hay un repo-synapse corriendo');
+    expect(second.output()).toContain('Ya hay un visor de Neurons corriendo');
     first.child.kill('SIGINT');
     expect((await first.exited).code).toBe(0);
 
     // Stale lock + leftovers of a crashed run.
-    fs.writeFileSync(path.join(repo, '.repo-synapse', 'lock'), JSON.stringify({ pid: 2 ** 22 + 4321 }));
+    fs.writeFileSync(path.join(repo, '.neurons', 'lock'), JSON.stringify({ pid: 2 ** 22 + 4321 }));
     execFileSync(process.execPath, [CLI, 'install', repo, '--port', '7'], {
       env: { ...process.env, CLAUDE_CONFIG_DIR: cfg, GIT_CONFIG_GLOBAL: '/dev/null', XDG_CONFIG_HOME: xdgDir },
     });
@@ -338,8 +366,8 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     // A live process that started long after the lock was written cannot be its owner.
     const squatter = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
     children.push(squatter);
-    fs.mkdirSync(path.join(repo, '.repo-synapse'));
-    const lockFile = path.join(repo, '.repo-synapse', 'lock');
+    fs.mkdirSync(path.join(repo, '.neurons'));
+    const lockFile = path.join(repo, '.neurons', 'lock');
     fs.writeFileSync(lockFile, JSON.stringify({ pid: squatter.pid, startedAt: '2001-01-01T00:00:00.000Z' }) + '\n');
 
     const doctor = run(['doctor', repo], cfg);
@@ -353,7 +381,7 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     expect(JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid).toBe(r.child.pid);
     r.child.kill('SIGINT');
     expect((await r.exited).code).toBe(0);
-    expect(fs.readdirSync(path.join(repo, '.repo-synapse')).filter((f) => f.startsWith('lock'))).toEqual([]);
+    expect(fs.readdirSync(path.join(repo, '.neurons')).filter((f) => f.startsWith('lock'))).toEqual([]);
   });
 
   it('the refusal of a live lock says how to recover (F7)', async () => {
@@ -363,8 +391,8 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     await first.waitFor(READY);
     const second = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff', '--no-install'], cfg);
     expect((await second.exited).code).toBe(1);
-    expect(second.output()).toContain('Ya hay un repo-synapse corriendo');
-    expect(second.output()).toContain(`borrá ${path.join(repo, '.repo-synapse', 'lock')}`);
+    expect(second.output()).toContain('Ya hay un visor de Neurons corriendo');
+    expect(second.output()).toContain(`borrá ${path.join(repo, '.neurons', 'lock')}`);
     first.child.kill('SIGINT');
     expect((await first.exited).code).toBe(0);
   });
@@ -373,8 +401,8 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     for (let round = 0; round < 3; round++) {
       const repo = gitRepo();
       const cfg = tmp('rs-cli-cfg-');
-      fs.mkdirSync(path.join(repo, '.repo-synapse'));
-      const lockFile = path.join(repo, '.repo-synapse', 'lock');
+      fs.mkdirSync(path.join(repo, '.neurons'));
+      const lockFile = path.join(repo, '.neurons', 'lock');
       fs.writeFileSync(lockFile, JSON.stringify({ pid: 2 ** 22 + 4321, startedAt: '2001-01-01T00:00:00.000Z' }));
       const racers = [0, 1, 2, 3, 4].map(() => run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff'], cfg));
       const settled = await Promise.all(
@@ -390,7 +418,7 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
       expect(winners).toHaveLength(1);
       for (const l of losers) {
         expect((await l.exited).code).toBe(1);
-        expect(l.output()).toMatch(/Ya hay un repo-synapse corriendo|otro repo-synapse está arrancando/);
+        expect(l.output()).toMatch(/Ya hay un visor de Neurons corriendo|otro visor de Neurons está arrancando/);
       }
       const winner = winners[0]!;
       expect(JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid).toBe(winner.child.pid);
@@ -399,7 +427,7 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
       winner.child.kill('SIGINT');
       expect((await winner.exited).code).toBe(0);
       expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
-      expect(fs.readdirSync(path.join(repo, '.repo-synapse')).filter((f) => f.startsWith('lock'))).toEqual([]);
+      expect(fs.readdirSync(path.join(repo, '.neurons')).filter((f) => f.startsWith('lock'))).toEqual([]);
     }
   }, 60_000);
 
@@ -410,12 +438,12 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     const port = Number((await r.waitFor(READY))[1]);
     const settings = path.join(repo, '.claude', 'settings.local.json');
     const before = fs.readFileSync(settings, 'utf8');
-    const manifest = path.join(repo, '.repo-synapse', 'install.json');
+    const manifest = path.join(repo, '.neurons', 'install.json');
     const manifestBefore = fs.readFileSync(manifest, 'utf8');
 
     const inst = run(['install', repo, '--port', '7'], cfg);
     expect((await inst.exited).code).toBe(1);
-    expect(inst.output()).toContain('repo-synapse está corriendo');
+    expect(inst.output()).toContain('Neurons está corriendo');
     expect(fs.readFileSync(settings, 'utf8')).toBe(before);
     expect(fs.readFileSync(manifest, 'utf8')).toBe(manifestBefore);
     expect(ownUrls(settings).every((o) => o.url === hookUrl(port))).toBe(true);
@@ -455,6 +483,83 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
   });
 
+  it('start undoes an install left by repo-synapse, keeps its log, and restores the original bytes on exit', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    fs.mkdirSync(path.join(repo, '.claude'));
+    const original = '{\n\t"permissions": { "allow": ["Bash(ls:*)"] }\n}';
+    writeLegacyInstall(repo, original, 7777);
+    const legacyLog = path.join(repo, '.repo-synapse', 'events.jsonl');
+    fs.writeFileSync(legacyLog, '{"kind":"tree"}\n');
+    const settings = path.join(repo, '.claude', 'settings.local.json');
+
+    const r = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff'], cfg);
+    const port = Number((await r.waitFor(READY))[1]);
+    expect(legacyCount(settings)).toBe(0);
+    expect(ownUrls(settings).every((o) => o.url === hookUrl(port))).toBe(true);
+    expect(fs.existsSync(path.join(repo, '.repo-synapse', 'install.json'))).toBe(false);
+    expect(fs.readFileSync(path.join(repo, '.neurons', 'settings.local.json.bak'), 'utf8')).toBe(original);
+    r.child.kill('SIGINT');
+    expect((await r.exited).code).toBe(0);
+    expect(fs.readFileSync(settings, 'utf8')).toBe(original);
+    expect(fs.readFileSync(legacyLog, 'utf8')).toBe('{"kind":"tree"}\n');
+  });
+
+  it('uninstall removes the hooks and the install of repo-synapse', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    fs.mkdirSync(path.join(repo, '.claude'));
+    const original = '{"model":"opus"}';
+    writeLegacyInstall(repo, original, 7777);
+    const un = run(['uninstall', repo], cfg);
+    expect((await un.exited).code).toBe(0);
+    expect(un.output()).toContain('Hooks quitados');
+    expect(fs.readFileSync(path.join(repo, '.claude', 'settings.local.json'), 'utf8')).toBe(original);
+    expect(fs.existsSync(path.join(repo, '.repo-synapse'))).toBe(false);
+  });
+
+  it('start refuses while a repo-synapse viewer is running on the repo', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    const old = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    children.push(old);
+    fs.mkdirSync(path.join(repo, '.repo-synapse'));
+    const legacyLock = path.join(repo, '.repo-synapse', 'lock');
+    fs.writeFileSync(legacyLock, JSON.stringify({ pid: old.pid, startedAt: new Date().toISOString() }) + '\n');
+    const r = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff'], cfg);
+    expect((await r.exited).code).toBe(1);
+    expect(r.output()).toContain('La versión anterior (repo-synapse) está corriendo');
+    expect(r.output()).toContain(`borrá ${legacyLock}`);
+    expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
+  });
+
+  it('replay of a repo prefers .neurons/events.jsonl and falls back to .repo-synapse/', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    const rec = run(['start', repo, '--no-open', '--port', '0', '--no-install', '--no-bash-diff'], cfg);
+    await rec.waitFor(READY);
+    rec.child.kill('SIGINT');
+    expect((await rec.exited).code).toBe(0);
+    const log = fs.readFileSync(path.join(repo, '.neurons', 'events.jsonl'));
+
+    const replay = async (expected: string) => {
+      const r = run(['replay', repo, '--no-open', '--port', '0'], cfg);
+      await r.waitFor(READY);
+      expect((await r.waitFor(/Registro: (.+)\n/))[1]).toBe(expected);
+      r.child.kill('SIGINT');
+      await r.exited;
+    };
+    fs.mkdirSync(path.join(repo, '.repo-synapse'));
+    fs.writeFileSync(path.join(repo, '.repo-synapse', 'events.jsonl'), log);
+    await replay(path.join(repo, '.neurons', 'events.jsonl'));
+    fs.rmSync(path.join(repo, '.neurons'), { recursive: true });
+    await replay(path.join(repo, '.repo-synapse', 'events.jsonl'));
+    fs.rmSync(path.join(repo, '.repo-synapse'), { recursive: true });
+    const none = run(['replay', repo, '--no-open', '--port', '0'], cfg);
+    expect((await none.exited).code).toBe(1);
+    expect(none.output()).toContain(`${path.join(repo, '.neurons', 'events.jsonl')} no existe`);
+  });
+
   it('doctor runs and exits 0', async () => {
     const repo = gitRepo();
     const cfg = tmp('rs-cli-cfg-');
@@ -471,4 +576,302 @@ describe('repo-synapse CLI (dist/cli.mjs)', () => {
     expect(code).toBe(1);
     expect(r.output()).toContain('No existe el directorio');
   });
+});
+
+describe('Neurons CLI: routing, repo root, sessions and the viewer registry', () => {
+  /** Env for a run with its own NEURONS_HOME. */
+  function homeEnv(): { NEURONS_HOME: string } {
+    return { NEURONS_HOME: tmp('rs-cli-nh-') };
+  }
+
+  function registryFiles(home: string): string[] {
+    try {
+      return fs.readdirSync(path.join(home, 'viewers'));
+    } catch {
+      return [];
+    }
+  }
+
+  async function finished(r: Run): Promise<{ code: number | null; out: string }> {
+    const { code } = await r.exited;
+    return { code, out: r.output() };
+  }
+
+  it('no command starts on the git root of the cwd; ls lists it; stop from a subdir restores the settings', async () => {
+    const repo = gitRepo();
+    const sub = path.join(repo, 'src');
+    const cfg = tmp('rs-cli-cfg-');
+    const env = homeEnv();
+    const localFile = path.join(repo, '.claude', 'settings.local.json');
+    fs.mkdirSync(path.dirname(localFile));
+    const localOriginal = '{ "permissions": { "allow": [ "Bash(ls:*)" ] } }';
+    fs.writeFileSync(localFile, localOriginal);
+
+    const r = run(['--no-open', '--no-bash-diff', '--port', '0'], cfg, { cwd: sub, env });
+    const port = Number((await r.waitFor(READY))[1]);
+    await r.waitFor(/Ctrl\+C para salir/);
+    expect(r.output()).toContain(`Usando la raíz del repositorio: ${repo}`);
+    expect(r.output()).toContain(`Repositorio: ${repo}`);
+    expect(r.output()).not.toContain('No es un repositorio git');
+    expect(ownUrls(localFile).every((o) => o.url === hookUrl(port))).toBe(true);
+
+    const entryFile = path.join(env.NEURONS_HOME, 'viewers', `${r.child.pid}.json`);
+    const entry = JSON.parse(fs.readFileSync(entryFile, 'utf8')) as Record<string, unknown>;
+    expect(entry).toMatchObject({ pid: r.child.pid, repo, port, url: `http://127.0.0.1:${port}`, cmd: CLI });
+    expect(Number.isNaN(Date.parse(String(entry.startedAt)))).toBe(false);
+
+    const ls = await finished(run(['ls'], cfg, { env }));
+    expect(ls.code).toBe(0);
+    const [header, row] = ls.out.trim().split('\n');
+    expect(header).toMatch(/^Repositorio\s+Puerto\s+URL\s+PID\s+Desde$/);
+    expect(row).toContain(repo);
+    expect(row).toContain(`http://127.0.0.1:${port}`);
+    expect(row).toMatch(new RegExp(`\\s${port}\\s.*\\s${r.child.pid}\\s+\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d$`));
+
+    const stop = await finished(run(['stop'], cfg, { cwd: sub, env }));
+    expect(stop.code).toBe(0);
+    expect(stop.out).toContain(`Usando la raíz del repositorio: ${repo}`);
+    expect(stop.out).toContain(`(PID ${r.child.pid}) cerrado.`);
+    const exit = await r.exited;
+    expect(exit.code).toBe(0);
+    expect(fs.readFileSync(localFile, 'utf8')).toBe(localOriginal);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'lock'))).toBe(false);
+    expect(registryFiles(env.NEURONS_HOME)).toEqual([]);
+
+    const again = await finished(run(['ls'], cfg, { env }));
+    expect(again.out.trim()).toBe('No hay visores corriendo.');
+    const none = await finished(run(['stop', repo], cfg, { env }));
+    expect(none.code).toBe(1);
+    expect(none.out).toContain(`No hay un visor de Neurons corriendo sobre ${repo}.`);
+  });
+
+  it('`neu <dir>` starts on that dir and says when it is not a git repo', async () => {
+    const dir = tmp('rs-cli-plain-');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+    const cfg = tmp('rs-cli-cfg-');
+    const env = homeEnv();
+    const r = run([dir, '--no-open', '--no-install', '--port', '0'], cfg, { env });
+    await r.waitFor(/Ctrl\+C para salir/);
+    expect(r.output()).toContain('No es un repositorio git: el árbol se arma recorriendo la carpeta');
+    expect(r.output()).toContain(`Repositorio: ${dir}`);
+    expect(r.output()).not.toContain('Usando la raíz');
+    const stop = await finished(run(['stop', dir], cfg, { env }));
+    expect(stop.code).toBe(0);
+    expect((await r.exited).code).toBe(0);
+  });
+
+  it('help, an unknown command and an unknown directory', async () => {
+    const cfg = tmp('rs-cli-cfg-');
+    for (const args of [['help'], ['-h'], ['--help']]) {
+      const h = await finished(run(args, cfg));
+      expect(h.code).toBe(0);
+      for (const s of ['neu stop --all', 'neu open [repo]', 'neu ls', 'Ejemplos:', '--no-open', '--no-install', '--no-bash-diff', '--port N', '--strict-port']) {
+        expect(h.out).toContain(s);
+      }
+      expect(h.out).not.toMatch(/[\u2013\u2014]/);
+    }
+    const unknown = await finished(run(['sotp'], cfg, { cwd: tmp('rs-cli-cwd-') }));
+    expect(unknown.code).toBe(1);
+    expect(unknown.out).toContain('Comando desconocido: "sotp".');
+    expect(unknown.out).toContain('¿Quisiste decir "neu stop"?');
+    const missing = await finished(run(['./no-existe-xyz'], cfg));
+    expect(missing.code).toBe(1);
+    expect(missing.out).toContain('no existe');
+    // An existing file is not "a folder that does not exist"; a .jsonl points to replay.
+    const cwd = tmp('rs-cli-cwd-');
+    fs.writeFileSync(path.join(cwd, 'README.md'), '# x\n');
+    fs.writeFileSync(path.join(cwd, 'events.jsonl'), '');
+    const file = await finished(run(['README.md'], cfg, { cwd }));
+    expect(file.code).toBe(1);
+    expect(file.out).toContain(`${path.join(cwd, 'README.md')} es un archivo, no una carpeta.`);
+    expect(file.out).not.toContain('no existe');
+    const log = await finished(run(['events.jsonl'], cfg, { cwd }));
+    expect(log.out).toContain('neu replay events.jsonl');
+  });
+
+  it('open picks the viewer, lists several, and stop --all closes every one', async () => {
+    const a = gitRepo();
+    const b = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    // A fake opener first in PATH records the URL instead of opening a browser.
+    const bin = tmp('rs-cli-bin-');
+    const log = path.join(bin, 'opened.log');
+    for (const name of ['open', 'xdg-open']) {
+      fs.writeFileSync(path.join(bin, name), `#!/bin/sh\necho "$@" >> "${log}"\n`, { mode: 0o755 });
+    }
+    const env = { ...homeEnv(), PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` };
+    const localFile = path.join(a, '.claude', 'settings.local.json');
+
+    const ra = run([a, '--no-open', '--no-bash-diff', '--port', '0'], cfg, { env });
+    const pa = Number((await ra.waitFor(READY))[1]);
+    const one = await finished(run(['open'], cfg, { env }));
+    expect(one.code).toBe(0);
+    expect(fs.readFileSync(log, 'utf8').trim()).toBe(`http://127.0.0.1:${pa}`);
+
+    const rb = run([b, '--no-open', '--no-install', '--port', '0'], cfg, { env });
+    const pb = Number((await rb.waitFor(READY))[1]);
+    const several = await finished(run(['open'], cfg, { env }));
+    expect(several.code).toBe(1);
+    expect(several.out).toContain('Hay varios visores corriendo:');
+    expect(several.out).toContain(a);
+    expect(several.out).toContain(b);
+    expect(several.out).toContain('neu open <repo>');
+
+    // Without a repo, the viewer of the repo you are in wins (like `stop`).
+    const here = await finished(run(['open'], cfg, { cwd: path.join(a, 'src'), env }));
+    expect(here.code).toBe(0);
+    const pickB = await finished(run(['open', path.join(b, 'src')], cfg, { env }));
+    expect(pickB.code).toBe(0);
+    expect(fs.readFileSync(log, 'utf8').trim().split('\n')).toEqual([`http://127.0.0.1:${pa}`, `http://127.0.0.1:${pa}`, `http://127.0.0.1:${pb}`]);
+
+    const noViewer = await finished(run(['open', gitRepo()], cfg, { env }));
+    expect(noViewer.code).toBe(1);
+    expect(noViewer.out).toContain('No hay un visor de Neurons corriendo sobre');
+
+    expect(fs.existsSync(localFile)).toBe(true);
+    const all = await finished(run(['stop', '--all'], cfg, { env }));
+    expect(all.code).toBe(0);
+    expect(all.out).toContain('Cerrando 2 visores...');
+    expect((await ra.exited).code).toBe(0);
+    expect((await rb.exited).code).toBe(0);
+    expect(fs.existsSync(localFile)).toBe(false);
+    expect(registryFiles(env.NEURONS_HOME)).toEqual([]);
+    expect((await finished(run(['stop', '--all'], cfg, { env }))).out.trim()).toBe('No hay visores corriendo.');
+    const none = await finished(run(['open'], cfg, { env }));
+    expect(none.code).toBe(1);
+    expect(none.out).toContain('No hay visores corriendo.');
+  });
+
+  it('stop never signals a registered PID whose process is not a viewer', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    const env = homeEnv();
+    const k = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    children.push(k);
+    const viewers = path.join(env.NEURONS_HOME, 'viewers');
+    fs.mkdirSync(viewers, { recursive: true });
+    // startedAt after the process started: the PID is "the same process", but its command
+    // line does not run the recorded script.
+    const entry = { pid: k.pid, repo, port: 1, url: 'http://127.0.0.1:1', startedAt: new Date(Date.now() + 60_000).toISOString(), cmd: '/nowhere/dist/cli.mjs' };
+    fs.writeFileSync(path.join(viewers, `${k.pid}.json`), JSON.stringify(entry));
+    for (const args of [['stop', repo], ['stop', repo, '--force'], ['stop', '--all']]) {
+      const s = await finished(run(args, cfg, { env }));
+      expect(s.code).toBe(1);
+      expect(s.out).toContain(`El PID ${k.pid} anotado para`);
+      expect(s.out).toContain('no se le envió ninguna señal');
+    }
+    expect(k.exitCode).toBeNull();
+    expect(k.signalCode).toBeNull();
+  });
+
+  it('stop closes a viewer launched with a relative script path', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    const env = homeEnv();
+    // `ps` shows "node dist/cli.mjs ...", while argv[1] (the recorded cmd) is absolute.
+    const r = run(['start', repo, '--no-open', '--no-install', '--no-bash-diff', '--port', '0'], cfg, { env, cwd: ROOT, script: path.relative(ROOT, CLI) });
+    await r.waitFor(/Ctrl\+C para salir/);
+    const entry = JSON.parse(fs.readFileSync(path.join(env.NEURONS_HOME, 'viewers', `${r.child.pid}.json`), 'utf8')) as Record<string, unknown>;
+    expect(entry.cmd).toBe(CLI);
+    expect(String(entry.command)).toContain(` ${path.relative(ROOT, CLI)} start `);
+    const stop = await finished(run(['stop', repo], cfg, { env }));
+    expect(stop.out).toContain(`(PID ${r.child.pid}) cerrado.`);
+    expect(stop.code).toBe(0);
+    expect((await r.exited).code).toBe(0);
+  });
+
+  it('stop never signals the viewer of another repo through a stale lock whose PID it reused (F2)', async () => {
+    const a = gitRepo();
+    const b = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    const env = homeEnv();
+    const rb = run(['start', b, '--no-open', '--no-install', '--no-bash-diff', '--port', '0'], cfg, { env });
+    await rb.waitFor(/Ctrl\+C para salir/);
+    // A's viewer crashed long ago; its lock names the PID B now runs under, and B's script.
+    fs.mkdirSync(path.join(a, '.neurons'), { recursive: true });
+    fs.writeFileSync(path.join(a, '.neurons', 'lock'), JSON.stringify({ pid: rb.child.pid, startedAt: '2020-01-01T00:00:00.000Z', cmd: CLI }) + '\n');
+    for (const args of [['stop', a], ['stop', a, '--force']]) {
+      const s = await finished(run(args, cfg, { env }));
+      expect(s.code).toBe(1);
+      expect(s.out).toContain(`No hay un visor de Neurons corriendo sobre ${a}.`);
+    }
+    expect(rb.child.exitCode).toBeNull();
+    expect(rb.child.signalCode).toBeNull();
+    const stopB = await finished(run(['stop', b], cfg, { env }));
+    expect(stopB.code).toBe(0);
+    expect((await rb.exited).code).toBe(0);
+  });
+
+  it('stop reports a viewer that does not exit; --force kills it and restores both settings files', async () => {
+    const repo = gitRepo();
+    const cfg = tmp('rs-cli-cfg-');
+    const env = homeEnv();
+    const userFile = path.join(cfg, 'settings.json');
+    const userOriginal = '{\n  "theme": "dark"\n}\n';
+    fs.writeFileSync(userFile, userOriginal);
+    const localFile = path.join(repo, '.claude', 'settings.local.json');
+
+    const r = run(['start', repo, '--no-open', '--port', '0'], cfg, { env });
+    await r.waitFor(READY);
+    expect(JSON.parse(fs.readFileSync(userFile, 'utf8'))).toEqual({ theme: 'dark', bashEditDiffEnabled: true });
+    expect(fs.existsSync(localFile)).toBe(true);
+    // A stopped process cannot run its SIGTERM handler: it stands for a hung viewer.
+    r.child.kill('SIGSTOP');
+
+    const soft = await finished(run(['stop', repo], cfg, { env }));
+    expect(soft.code).toBe(1);
+    expect(soft.out).toContain('no se cerró en 8 s');
+    // The hint names the repo: without it, `neu stop --force` acts on the cwd's repo.
+    expect(soft.out).toContain(`neu stop --force ${repo}`);
+    expect(fs.existsSync(localFile)).toBe(true);
+
+    const hard = await finished(run(['stop', repo, '--force'], cfg, { env }));
+    expect(hard.code).toBe(0);
+    expect(hard.out).toContain('terminado con SIGKILL');
+    expect(hard.out).toContain('Hooks quitados.');
+    expect((await r.exited).signal).toBe('SIGKILL');
+    expect(fs.existsSync(localFile)).toBe(false);
+    expect(fs.readFileSync(userFile, 'utf8')).toBe(userOriginal);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'lock'))).toBe(false);
+    expect(fs.existsSync(path.join(repo, '.neurons', 'install.json'))).toBe(false);
+    expect(registryFiles(env.NEURONS_HOME)).toEqual([]);
+  }, 40_000);
+
+  it.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')(
+    'start warns about Claude Code sessions already open in the repo',
+    async () => {
+      const repo = gitRepo();
+      const cfg = tmp('rs-cli-cfg-');
+      const env = homeEnv();
+      // A process whose argv[0] is ".../claude", with its cwd inside the repo.
+      const bin = tmp('rs-cli-fakeclaude-');
+      fs.symlinkSync(fs.existsSync('/bin/sleep') ? '/bin/sleep' : '/usr/bin/sleep', path.join(bin, 'claude'));
+      const fake = spawn(path.join(bin, 'claude'), ['60'], { cwd: path.join(repo, 'src'), stdio: 'ignore' });
+      children.push(fake);
+      // One outside the repo is ignored.
+      const other = spawn(path.join(bin, 'claude'), ['60'], { cwd: bin, stdio: 'ignore' });
+      children.push(other);
+
+      const r = run(['start', repo, '--no-open', '--no-bash-diff', '--port', '0'], cfg, { env });
+      await r.waitFor(/Ctrl\+C para salir/);
+      expect(r.output()).toContain(`Hay 1 sesión de Claude Code abierta en este repositorio (PID ${fake.pid}).`);
+      expect(r.output()).toContain('si no ves eventos de esa sesión, reiniciala (/exit y después claude --continue)');
+      expect(r.output()).not.toContain(String(other.pid));
+      r.child.kill('SIGTERM');
+      expect((await r.exited).code).toBe(0);
+      expect(fake.exitCode).toBeNull();
+      expect(fake.signalCode).toBeNull();
+
+      // Without sessions it just says to open Claude Code.
+      fake.kill('SIGKILL');
+      await new Promise((res) => fake.once('exit', res));
+      const r2 = run(['start', repo, '--no-open', '--no-bash-diff', '--port', '0'], cfg, { env });
+      await r2.waitFor(/Ctrl\+C para salir/);
+      expect(r2.output()).toContain('Abrí Claude Code en este repositorio.');
+      expect(r2.output()).not.toContain('sesión de Claude Code abierta');
+      r2.child.kill('SIGTERM');
+      await r2.exited;
+    },
+    20_000,
+  );
 });
