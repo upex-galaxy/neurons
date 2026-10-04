@@ -22,6 +22,12 @@ const FIXTURE = path.join(ROOT, 'test', 'fixtures', 'payloads', 'run1.jsonl');
  * does its cleanup in its place (docs/DECISIONS.md, W2).
  */
 const WIN = process.platform === 'win32';
+/**
+ * How long a run may take to print what a test waits for. A start reads its own command
+ * line from WMI through PowerShell, and the first PowerShell of a Windows CI runner has
+ * taken over 10 s to come up.
+ */
+const WAIT_MS = WIN ? 30_000 : 10_000;
 
 const tmpDirs: string[] = [];
 const children: ChildProcess[] = [];
@@ -129,7 +135,7 @@ function run(args: string[], cfgDir: string, o: { cwd?: string; env?: NodeJS.Pro
     child,
     output: () => buf,
     exited,
-    waitFor(re, ms = 10_000) {
+    waitFor(re, ms = WAIT_MS) {
       return new Promise((resolve, reject) => {
         const check = () => {
           const m = buf.match(re);
