@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { E2E_PORTS, e2eDir, e2eRepo, fixturePayloads } from '../../scripts/e2e/fixtures.mjs';
-import { counter, openViewer, postHook, sleep, vizState } from './helpers.ts';
+import { counter, isSoftwareRenderer, openViewer, postHook, sleep, vizState, webglRenderer } from './helpers.ts';
 
 const PORT = E2E_PORTS.perf;
 const SAMPLE_MS = 5_000;
@@ -28,17 +28,7 @@ test('2,000 files at 30 fps or more with live events (with a GPU)', async ({ pag
   expect(loaded.nodeCount).toBeGreaterThan(2_000);
   expect(loaded.renderer).toBe('3d');
 
-  const gpu = await page.evaluate(() => {
-    const doc = (globalThis as unknown as { document: { createElement(t: 'canvas'): { getContext(k: string): unknown } } }).document;
-    const gl = doc.createElement('canvas').getContext('webgl') as {
-      getExtension(n: string): { UNMASKED_RENDERER_WEBGL: number } | null;
-      getParameter(p: number): unknown;
-      RENDERER: number;
-    } | null;
-    if (!gl) return 'no WebGL';
-    const ext = gl.getExtension('WEBGL_debug_renderer_info');
-    return String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
-  });
+  const gpu = await webglRenderer(page);
 
   // Let the layout settle (warmup + cooldown) before measuring.
   await sleep(3_000);
@@ -86,7 +76,7 @@ test('2,000 files at 30 fps or more with live events (with a GPU)', async ({ pag
   // Every Read reached the page.
   expect(counter(after, 'read')).toBeGreaterThanOrEqual(sent - 1);
 
-  const software = /swiftshader|llvmpipe|software/i.test(gpu) || gpu === 'no WebGL';
+  const software = isSoftwareRenderer(gpu);
   test.skip(software, `software WebGL (${gpu}): measured ${median} fps, ${MIN_FPS} not required`);
   expect(median).toBeGreaterThanOrEqual(MIN_FPS);
 });
