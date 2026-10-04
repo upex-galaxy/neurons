@@ -129,6 +129,21 @@ describe('viewer registry', () => {
     expect(listViewers()).toEqual([]);
   });
 
+  // Regression (Windows CI): `neu stop` of a --no-install viewer removed hooks installed by hand.
+  it('records whether the viewer installs hooks; older entries without it still list', () => {
+    writeViewerEntry({ repo: '/r/noinst', port: 1, url: 'http://127.0.0.1:1', installs: false });
+    expect(listViewers()).toEqual([expect.objectContaining({ repo: '/r/noinst', installs: false })]);
+    writeViewerEntry({ repo: '/r/inst', port: 2, url: 'http://127.0.0.1:2', installs: true });
+    expect(viewerForRepo('/r/inst')?.installs).toBe(true);
+    writeViewerEntry({ repo: '/r/old', port: 3, url: 'http://127.0.0.1:3' });
+    expect(viewerForRepo('/r/old')).toBeDefined();
+    expect(viewerForRepo('/r/old')?.installs).toBeUndefined();
+    const file = path.join(viewersDir(), `${process.pid}.json`);
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), installs: 'no' }));
+    expect(listViewers()).toEqual([]);
+    removeViewerEntry();
+  });
+
   it('prunes dead PIDs, reused PIDs, corrupt files and mismatched names on read', () => {
     const dead = deadPid();
     writeViewerEntry({ pid: dead, repo: '/r/dead', port: 1, url: 'http://127.0.0.1:1', cmd: '/x/dist/cli.mjs' });

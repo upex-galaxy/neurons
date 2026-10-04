@@ -181,6 +181,16 @@ function expectStoppedExit(exit: { code: number | null }): void {
   if (!WIN) expect(exit.code).toBe(0);
 }
 
+/**
+ * A repo as `ls` and `open` list it: under the home directory as `~/...`. The temp dir is
+ * under the home on Windows (AppData\Local\Temp), not on macOS or Linux.
+ */
+function shown(p: string): string {
+  const home = os.homedir();
+  if (p === home) return '~';
+  return p.startsWith(home + path.sep) ? `~${p.slice(home.length)}` : p;
+}
+
 function firstFixture(repo: string): string {
   const line = fs.readFileSync(FIXTURE, 'utf8').split('\n').find((l) => l.trim() !== '');
   return rerootPayloadLine(line ?? '{}', repo, '/Users/fake-home');
@@ -661,7 +671,7 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     expect(ls.code).toBe(0);
     const [header, row] = ls.out.trim().split('\n');
     expect(header).toMatch(/^Repositorio\s+Puerto\s+URL\s+PID\s+Desde$/);
-    expect(row).toContain(repo);
+    expect(row).toContain(shown(repo));
     expect(row).toContain(`http://127.0.0.1:${port}`);
     expect(row).toMatch(new RegExp(`\\s${port}\\s.*\\s${r.child.pid}\\s+\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d$`));
 
@@ -780,8 +790,8 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     const several = await finished(run(['open'], cfg, { env }));
     expect(several.code).toBe(1);
     expect(several.out).toContain('Hay varios visores corriendo:');
-    expect(several.out).toContain(a);
-    expect(several.out).toContain(b);
+    expect(several.out).toContain(shown(a));
+    expect(several.out).toContain(shown(b));
     expect(several.out).toContain('neu open <repo>');
 
     // Without a repo, the viewer of the repo you are in wins (like `stop`).

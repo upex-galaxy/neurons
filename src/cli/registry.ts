@@ -26,6 +26,12 @@ export interface ViewerEntry {
    * Missing in entries written before it existed: `cmd` is matched then.
    */
   command?: string;
+  /**
+   * False for a viewer started with --no-install: it installs no hooks, so whatever hooks
+   * the repo has were put there by hand and outlive it. Missing in entries written before
+   * it existed (taken as true).
+   */
+  installs?: boolean;
 }
 
 export function neuronsHome(): string {
@@ -52,7 +58,8 @@ function isEntry(v: unknown): v is ViewerEntry {
     typeof e.url === 'string' &&
     typeof e.startedAt === 'string' &&
     typeof e.cmd === 'string' &&
-    (e.command === undefined || typeof e.command === 'string')
+    (e.command === undefined || typeof e.command === 'string') &&
+    (e.installs === undefined || typeof e.installs === 'boolean')
   );
 }
 
@@ -65,6 +72,7 @@ export function writeViewerEntry(o: {
   pid?: number;
   cmd?: string;
   command?: string;
+  installs?: boolean;
 }): string {
   const entry: ViewerEntry = {
     pid: o.pid ?? process.pid,
@@ -77,6 +85,7 @@ export function writeViewerEntry(o: {
   // Another PID's command line is only known when given (tests).
   const command = o.command ?? (o.pid === undefined ? ownCommand() : undefined);
   if (command) entry.command = command;
+  if (o.installs !== undefined) entry.installs = o.installs;
   const file = entryPath(entry.pid);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   writeFileAtomic(file, JSON.stringify(entry, null, 2) + '\n');
