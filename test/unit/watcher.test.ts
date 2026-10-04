@@ -232,6 +232,20 @@ describe('startWatcher', () => {
     expect(s.index.kind('src/b/one.ts')).toBe('file');
   });
 
+  // Regression (Linux CI): utimes cannot move a birth time back on Linux, so a file renamed
+  // a moment after it was created looked brand new and the rename came out as unlink + add.
+  // The inodes of the indexed entries are recorded at start: no age() here, on any platform.
+  it('pairs a rename of an indexed file born a moment ago by its inode', async () => {
+    const s = await setup({ 'old.txt': 'o', 'd/x.ts': 'x', 'keep.txt': 'k' });
+    fs.renameSync(path.join(s.root, 'old.txt'), path.join(s.root, 'new.txt'));
+    await waitFor(() => has(s.changes, 'move', 'new.txt'));
+    fs.renameSync(path.join(s.root, 'd'), path.join(s.root, 'e'));
+    await waitFor(() => has(s.changes, 'moveDir', 'e'));
+    await sleep(300);
+    const loud = s.changes.filter((c) => !c.quiet).map((c) => `${c.type}:${c.path}<${c.from ?? ''}`);
+    expect(loud).toEqual(['move:new.txt<old.txt', 'moveDir:e<d']);
+  });
+
   it('does not pair a delete with a freshly written file of the same name (git checkout)', async () => {
     const s = await setup({ 'a/index.ts': 'a', 'b/keep.txt': 'k' });
     fs.rmSync(path.join(s.root, 'a/index.ts'));
@@ -249,6 +263,8 @@ describe('startWatcher', () => {
     expect(s.changes.find((c) => c.type === 'move')).toMatchObject({ path: 'final.txt', from: 'draft.txt' });
   });
 
+  // On ext4 the new file often gets the inode number just freed: the birth time check keeps
+  // the recorded inode from pairing them.
   it('does not pair a delete with an unrelated new file', async () => {
     const s = await setup({ 'gone.txt': 'g' });
     fs.rmSync(path.join(s.root, 'gone.txt'));

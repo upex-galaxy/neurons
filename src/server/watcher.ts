@@ -15,6 +15,12 @@
 // the same path in another case, or, for an entry that was not born just now, the
 // same name elsewhere or the only pair of the batch. An unmatched unlink waits
 // `pairMs` for its add before it goes out.
+// The inodes of the indexed entries are read once at start (in chunks, off the startup
+// path), so a rename of a file older than the watcher pairs by inode on every platform.
+// That matters on Linux: inotify's rename cookie never reaches fs.watch, and a file
+// born a moment ago (created, then renamed) cannot be told from a new one by birth
+// time. An inode only matches when the added entry is not younger than the one
+// recorded, because ext4 hands a freed inode number to the next new file.
 // The watcher never mutates the index: the caller applies adds and removes.
 
 import fs from 'node:fs';
@@ -84,6 +90,14 @@ const DEFAULT_PAIR_MS = 200;
 /** A renamed entry keeps its birth time; a new one is born when it is seen. */
 const FRESH_BIRTH_MS = 1000;
 const MAX_INODES = 50_000;
+/** Index entries lstat-ed per tick while the start-up inode record is filled. */
+const SEED_CHUNK = 1000;
+
+/** What identifies an entry across a rename: its inode, and its birth time to reject a reused inode. */
+interface Identity {
+  ino: number;
+  birthMs: number;
+}
 
 function lstat(abs: string): fs.Stats | undefined {
   try {
@@ -125,8 +139,8 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
   const lastMtime = new Map<string, number>();
   /** Paths git ignores (and their subtrees), learned from isIgnored. */
   const ignoredCache = new Set<string>();
-  /** Inodes of entries the watcher has seen appear (to recognize them when they move). */
-  const inodes = new Map<string, number>();
+  /** Identities of indexed entries and of entries the watcher saw appear (to recognize them when they move). */
+  const inodes = new Map<string, Identity>();
   /** Unlinks waiting for the add that would pair them into a move. */
   let held: { change: DiskChange; until: number }[] = [];
   let heldTimer: NodeJS.Timeout | undefined;
@@ -283,6 +297,32 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
     // Folders the index does not know (empty, unlisted files only, past the scan cap).
     discover('');
   }
+  seedInodes();
+
+  /**
+   * Records the identity of the entries the index holds at start, a chunk per tick. An
+   * entry the watcher already recorded (it changed or appeared since) keeps that record.
+   */
+  function seedInodes(): void {
+    const rels = index
+      .snapshot()
+      .entries.filter((e) => !excluded(e.path))
+      .slice(0, MAX_INODES)
+      .map((e) => e.path);
+    let i = 0;
+    const step = (): void => {
+      if (closed) return;
+      const end = Math.min(i + SEED_CHUNK, rels.length);
+      for (; i < end; i++) {
+        const rel = rels[i] as string;
+        if (inodes.has(rel)) continue;
+        const st = lstat(path.join(root, rel));
+        if (st) rememberInode(rel, st, false);
+      }
+      if (i < rels.length) setImmediate(step);
+    };
+    step();
+  }
 
   function schedule(): void {
     timer = undefined;
@@ -429,7 +469,11 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
     const used = new Set<DiskChange>();
     const pool = [...held.map((h) => h.change), ...removals];
 
-    const match = (keyOfRemoval: (r: DiskChange) => string | undefined, keyOfAdd: (a: DiskChange) => string | undefined) => {
+    const match = (
+      keyOfRemoval: (r: DiskChange) => string | undefined,
+      keyOfAdd: (a: DiskChange) => string | undefined,
+      accept: (r: DiskChange, a: DiskChange) => boolean = () => true,
+    ) => {
       const byKey = new Map<string, DiskChange[]>();
       for (const r of pool) {
         if (used.has(r)) continue;
@@ -444,17 +488,23 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
         if (pairs.has(add)) continue;
         const k = keyOfAdd(add);
         if (k === undefined) continue;
-        const r = byKey.get(`${kindOf(add)}:${k}`)?.find((x) => !used.has(x));
+        const r = byKey.get(`${kindOf(add)}:${k}`)?.find((x) => !used.has(x) && accept(x, add));
         if (r) {
           pairs.set(add, r);
           used.add(r);
         }
       }
     };
-    // 1. Same inode (entries the watcher saw appear earlier).
+    // 1. Same inode (indexed at start, or seen appear), not born after the recorded entry:
+    // a younger entry on a recorded inode is a new file that reuses the number.
     match(
-      (r) => inodes.get(r.path)?.toString(),
+      (r) => inodes.get(r.path)?.ino.toString(),
       (a) => stats.get(a.path)?.ino.toString(),
+      (r, a) => {
+        const id = inodes.get(r.path);
+        const st = stats.get(a.path);
+        return id !== undefined && st !== undefined && st.birthtimeMs <= id.birthMs;
+      },
     );
     // 2. The same path spelled with another case (a case-only rename on APFS).
     match(
@@ -491,15 +541,20 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
       }
       const r = pairs.get(c);
       if (r) {
-        const ino = stats.get(c.path)?.ino;
-        inodes.delete(r.path);
-        if (ino !== undefined) rememberInode(c.path, ino);
+        const st = stats.get(c.path);
+        forgetInodes(r.path, r.type === 'unlinkDir');
+        if (st) rememberInode(c.path, st);
         out.push({ type: c.type === 'addDir' ? 'moveDir' : 'move', path: c.path, from: r.path, ts: Math.min(c.ts, r.ts) });
         continue;
       }
+      if (c.type === 'change') {
+        // An atomic save (a new file renamed over the old one) gives the path a new inode.
+        const st = stats.get(c.path);
+        if (st) rememberInode(c.path, st);
+      }
       if (isAddition(c)) {
-        const ino = stats.get(c.path)?.ino;
-        if (ino !== undefined) rememberInode(c.path, ino);
+        const st = stats.get(c.path);
+        if (st) rememberInode(c.path, st);
         if (hasAncestorIn(c.path, movedDirs)) {
           out.push({ ...c, quiet: true });
           continue;
@@ -510,13 +565,23 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
     return out;
   }
 
-  function rememberInode(rel: string, ino: number): void {
+  /** `fresh` false (the start-up record) never pushes out an entry seen since. */
+  function rememberInode(rel: string, st: fs.Stats, fresh = true): void {
+    if (!fresh && inodes.size >= MAX_INODES) return;
     inodes.delete(rel);
-    inodes.set(rel, ino);
+    inodes.set(rel, { ino: st.ino, birthMs: st.birthtimeMs });
     if (inodes.size > MAX_INODES) {
       const oldest = inodes.keys().next().value;
       if (oldest !== undefined) inodes.delete(oldest);
     }
+  }
+
+  /** Drops the record of `rel` and, for a dir, of everything under it (the paths are gone). */
+  function forgetInodes(rel: string, dir: boolean): void {
+    inodes.delete(rel);
+    if (!dir) return;
+    const prefix = `${rel}/`;
+    for (const k of inodes.keys()) if (k.startsWith(prefix)) inodes.delete(k);
   }
 
   function scheduleHeld(): void {
@@ -545,7 +610,7 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
       if (hasAncestorIn(h.change.path, removedDirs)) continue; // The dir's unlinkDir covers it.
       if (probeStat(h.change.path, listings)) continue; // Back on disk: its own event says so.
       if (!index.has(h.change.path)) continue;
-      inodes.delete(h.change.path);
+      forgetInodes(h.change.path, h.change.type === 'unlinkDir');
       track(h.change);
       opts.onChange(h.change);
     }
