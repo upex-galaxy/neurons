@@ -73,3 +73,23 @@ export function counter(s: VizStateLite, action: string): number {
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+/** The WebGL renderer string of the page ('no WebGL' without a context). */
+export async function webglRenderer(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const doc = (globalThis as unknown as { document: { createElement(t: 'canvas'): { getContext(k: string): unknown } } }).document;
+    const gl = doc.createElement('canvas').getContext('webgl') as {
+      getExtension(n: string): { UNMASKED_RENDERER_WEBGL: number } | null;
+      getParameter(p: number): unknown;
+      RENDERER: number;
+    } | null;
+    if (!gl) return 'no WebGL';
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    return String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+  });
+}
+
+/** True for software WebGL (SwiftShader, llvmpipe), as on CI runners without a GPU. */
+export function isSoftwareRenderer(renderer: string): boolean {
+  return /swiftshader|llvmpipe|software/i.test(renderer) || renderer === 'no WebGL';
+}

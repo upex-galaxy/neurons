@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { E2E_PORTS, SENTINEL_SETTINGS, e2eDir, e2eRepo, fixturePayloads } from '../../scripts/e2e/fixtures.mjs';
-import { counter, openViewer, postHook, sleep, vizState } from './helpers.ts';
+import { counter, isSoftwareRenderer, openViewer, postHook, sleep, vizState, webglRenderer } from './helpers.ts';
 
 const PORT = E2E_PORTS.live;
 const AGENT_ID = 'aa2b318dfea4c1d08';
@@ -89,8 +89,13 @@ test('real hooks: feed, counters, active, created and deleted nodes', async ({ p
     await expect(feedRow('lectura', 'src/api/user.ts').first()).toBeVisible();
     const latency = (await vizState(page)).lastEventLatencyMs;
     expect(latency).not.toBeNull();
-    test.info().annotations.push({ type: 'latencia', description: `${latency} ms (POST /hook -> primer destello)` });
-    expect(latency!).toBeLessThan(300);
+    // The 300 ms bar holds on a GPU. Software WebGL (SwiftShader on the Linux CI runner)
+    // renders the 3D view at a few fps and the main thread waits behind each frame: there
+    // the bound only catches a stalled pipeline (DECISIONS I53).
+    const renderer = await webglRenderer(page);
+    const bound = isSoftwareRenderer(renderer) ? 1_000 : 300;
+    test.info().annotations.push({ type: 'latencia', description: `${latency} ms (POST /hook -> primer destello), renderer="${renderer}", límite ${bound} ms` });
+    expect(latency!).toBeLessThan(bound);
   });
 
   await test.step('lectura, contexto anidado y edición', async () => {

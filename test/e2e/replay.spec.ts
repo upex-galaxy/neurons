@@ -25,12 +25,22 @@ test('replay: playback advances, pauses and honors the speed', async ({ page }) 
   await test.step('1x', async () => {
     await page.getByRole('button', { name: 'Reiniciar' }).click();
     await expect(page.locator('[data-speed="1"]')).toHaveAttribute('aria-pressed', 'true');
-    const a = await elapsed();
+    // Playhead and clock read in the same page task: each page.evaluate can wait behind a
+    // frame (seconds of drift on software WebGL), so the test's own clock overstates the
+    // span. The playhead moves once per frame, so the bounds leave a frame of slack.
+    const playheadAt = () =>
+      page.evaluate(() => {
+        const g = globalThis as unknown as { __vizState: { replay: { elapsedMs: number } }; performance: { now(): number } };
+        return { e: g.__vizState.replay.elapsedMs, t: g.performance.now() };
+      });
+    const a = await playheadAt();
     await sleep(800);
-    const d1 = (await elapsed()) - a;
-    test.info().annotations.push({ type: 'avance 1x', description: `${d1} ms en 800 ms` });
-    expect(d1).toBeGreaterThan(400);
-    expect(d1).toBeLessThan(1_300);
+    const b = await playheadAt();
+    const d1 = b.e - a.e;
+    const wall = Math.round(b.t - a.t);
+    test.info().annotations.push({ type: 'avance 1x', description: `${d1} ms en ${wall} ms` });
+    expect(d1).toBeGreaterThan(wall * 0.5);
+    expect(d1).toBeLessThan(wall * 1.625);
   });
 
   await test.step('pausa', async () => {
