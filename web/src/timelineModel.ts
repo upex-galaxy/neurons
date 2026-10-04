@@ -368,7 +368,8 @@ export class TimelineModel {
   private readonly groupsByKey = new Map<string, TimelineGroup>();
   private readonly openTurns = new Map<string, TurnSpan>();
   private readonly agentsById = new Map<string, AgentSpan>();
-  private readonly pending = new Map<string, number>();
+  /** Open calls by toolUseId: Pre ts and the rows its Pre marked (LRU by call, not by row). */
+  private readonly pending = new Map<string, { ts: number; rows: Set<string>; done: boolean }>();
   private readonly sessions = new Set<string>();
 
   constructor(private readonly kindOf?: KindOf) {}
@@ -395,6 +396,17 @@ export class TimelineModel {
 
   get counts(): TimelineCounts {
     return { rows: this.rows.size, marks: this.markCount, groups: this.groups.length, turns: this.turns.length, agents: this.agents.length };
+  }
+
+  /** Drops the oldest finished call, or the oldest call when every call is still open. */
+  private evictPending(): void {
+    for (const [id, c] of this.pending) {
+      if (c.done) {
+        this.pending.delete(id);
+        return;
+      }
+    }
+    this.pending.delete(this.pending.keys().next().value!);
   }
 
   /** Two or more main sessions marked rows: rows get a session stripe. */
@@ -425,15 +437,18 @@ export class TimelineModel {
     this.revision++;
     if (targets.length === 0) return true;
 
-    let startTs: number | undefined;
-    if (e.toolUseId) {
-      if (e.phase === 'pre') {
-        this.pending.set(e.toolUseId, e.ts);
-        if (this.pending.size > PENDING_MAX) this.pending.delete(this.pending.keys().next().value!);
-      } else {
-        startTs = this.pending.get(e.toolUseId);
-        this.pending.delete(e.toolUseId);
-      }
+    // A Post joins only the Pre drawn on its own row. One Post can become several events (a
+    // Bash edit diff marks one file per event) that share the toolUseId, so a match is not
+    // consumed; whole calls age out at PENDING_MAX, never single rows of a live call.
+    let call = e.toolUseId ? this.pending.get(e.toolUseId) : undefined;
+    if (e.toolUseId && e.phase === 'pre') {
+      if (call) this.pending.delete(e.toolUseId);
+      else call = { ts: e.ts, rows: new Set<string>(), done: false };
+      call.ts = e.ts;
+      this.pending.set(e.toolUseId, call);
+      if (this.pending.size > PENDING_MAX) this.evictPending();
+    } else if (call) {
+      call.done = true;
     }
     if (e.agentId) this.ensureAgent(e);
     const style = markStyle(e);
@@ -443,7 +458,10 @@ export class TimelineModel {
       const row = this.row(target, e.ts, addedAt);
       const mark: TimelineMark = { ...style, id: e.id, ts: e.ts, action: e.action, phase: e.phase, sessionId: e.sessionId };
       if (e.agentId) mark.agentId = e.agentId;
-      if (startTs !== undefined) mark.startTs = startTs;
+      if (call) {
+        if (e.phase === 'pre') call.rows.add(target.key);
+        else if (call.rows.has(target.key)) mark.startTs = call.ts;
+      }
       insertSorted(row.marks, mark);
       this.markCount++;
       if (e.agentId && !row.hasSub) {

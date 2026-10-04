@@ -112,6 +112,30 @@ describe('TimelineModel rows', () => {
     expect(m.rows.get('f:a.ts')!.firstTs).toBe(T0 + 100);
   });
 
+  it('joins a Post only with the Pre on its own row, for every event of a split Post', () => {
+    // `prettier --write src`: the Pre is a bash mark on the root row, the Post becomes one
+    // edit event per changed file, all with the same toolUseId.
+    const m = new TimelineModel();
+    m.add(ev({ ts: T0, paths: [''], action: 'bash', phase: 'pre', toolUseId: 'tu9' }));
+    for (const p of ['src/a.ts', 'src/b.ts', 'src/c.ts']) {
+      m.add(ev({ ts: T0 + 1200, paths: [p], action: 'edit', phase: 'post', toolUseId: 'tu9' }));
+    }
+    for (const p of ['src/a.ts', 'src/b.ts', 'src/c.ts']) {
+      expect(m.rows.get(`f:${p}`)!.marks[0]!.startTs).toBeUndefined();
+    }
+  });
+
+  it('gives every Post event on the Pre row its start, not just the first one', () => {
+    const m = new TimelineModel();
+    m.add(ev({ ts: T0, paths: ['old.ts', 'new.ts'], action: 'move', phase: 'pre', toolUseId: 'tu8' }));
+    m.add(ev({ ts: T0 + 300, paths: ['old.ts'], action: 'delete', phase: 'post', toolUseId: 'tu8' }));
+    m.add(ev({ ts: T0 + 300, paths: ['new.ts'], action: 'create', phase: 'post', toolUseId: 'tu8' }));
+    m.add(ev({ ts: T0 + 400, paths: ['other.ts'], action: 'edit', phase: 'post', toolUseId: 'tu8' }));
+    expect(m.rows.get('f:old.ts')!.marks[1]).toMatchObject({ phase: 'post', startTs: T0 });
+    expect(m.rows.get('f:new.ts')!.marks[1]).toMatchObject({ phase: 'post', startTs: T0 });
+    expect(m.rows.get('f:other.ts')!.marks[0]!.startTs).toBeUndefined();
+  });
+
   it('records the sessions that touched a row; two of them turn the stripe on', () => {
     const m = new TimelineModel();
     m.add(ev({ ts: T0, paths: ['a.ts'], sessionId: 's1' }));
@@ -282,5 +306,37 @@ describe('ellipsizeMiddle', () => {
     expect(cut.endsWith('user.ts')).toBe(true);
     expect(cut).toContain('…');
     expect(ellipsizeMiddle('abcdef', 0, len)).toBe('…');
+  });
+});
+
+describe('TimelineModel Pre/Post join', () => {
+  const postMark = (m: TimelineModel, path: string, id: string) =>
+    m.orderedRows().find((r) => r.key.endsWith(path))?.marks.find((k) => k.id === id);
+
+  it('keeps an open call joined while thousands of other calls start and finish', () => {
+    const m = new TimelineModel();
+    m.add(ev({ id: 'pre-a', ts: T0, toolUseId: 'call-a', phase: 'pre', action: 'bash', paths: ['a.ts'] }));
+    for (let i = 0; i < 2500; i++) {
+      m.add(ev({ ts: T0 + 1 + i, toolUseId: `other-${i}`, phase: 'pre', action: 'read', paths: [`f${i}.ts`] }));
+      m.add(ev({ ts: T0 + 2 + i, toolUseId: `other-${i}`, phase: 'post', action: 'read', paths: [`f${i}.ts`] }));
+    }
+    m.add(ev({ id: 'post-a', ts: T0 + 9000, toolUseId: 'call-a', phase: 'post', action: 'bash', paths: ['a.ts'] }));
+    expect(postMark(m, 'a.ts', 'post-a')?.startTs).toBe(T0);
+  });
+
+  it('joins every row of one call that touches more rows than the cap', () => {
+    const m = new TimelineModel();
+    const paths = Array.from({ length: 2500 }, (_, i) => `big/f${i}.ts`);
+    m.add(ev({ id: 'pre-big', ts: T0, toolUseId: 'call-big', phase: 'pre', action: 'read', paths }));
+    m.add(ev({ id: 'post-big', ts: T0 + 10, toolUseId: 'call-big', phase: 'post', action: 'read', paths }));
+    const joined = m.orderedRows().filter((r) => r.marks.some((k) => k.id === 'post-big' && k.startTs === T0));
+    expect(joined).toHaveLength(2500);
+  });
+
+  it('joins a Post only on the row its Pre marked', () => {
+    const m = new TimelineModel();
+    m.add(ev({ id: 'pre-x', ts: T0, toolUseId: 'call-x', phase: 'pre', action: 'read', paths: ['x.ts'] }));
+    m.add(ev({ id: 'post-y', ts: T0 + 5, toolUseId: 'call-x', phase: 'post', action: 'read', paths: ['y.ts'] }));
+    expect(postMark(m, 'y.ts', 'post-y')?.startTs).toBeUndefined();
   });
 });
