@@ -6,6 +6,10 @@
 //   GET  /tree       current TreeSnapshot
 //   GET  /api/sessions, /api/log
 //   GET  /ws         WebSocket upgrade (loopback Origin only)
+//   GET  /help       user guide page (dist/docs/guide.html), 404 when not built
+//   GET  /architecture  architecture page (dist/docs/architecture.html), 404 when not built
+//   GET  /docs/*     any file under dist/docs; /i18n/* and /img/* too when dist/docs has
+//                    them (the pages fetch their dictionaries relative to /help)
 //   GET  /*          static web UI with SPA fallback
 
 import { randomUUID } from 'node:crypto';
@@ -15,6 +19,7 @@ import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { t } from '../i18n.ts';
 import {
   STATE_DIR_NAME,
   type LogLine,
@@ -40,6 +45,8 @@ export interface NeuronsServerOptions {
   mode: 'live' | 'replay';
   /** Static web UI dir. Default: dist/web resolved from this module. */
   webDir?: string;
+  /** User guide and architecture pages (guide.html, architecture.html, i18n/, img/). Default: dist/docs. */
+  docsDir?: string;
   /** Live mode log. Default: <root>/.neurons/events.jsonl. */
   logFile?: string;
   /** Watch the disk (live mode only). Default true. */
@@ -63,6 +70,8 @@ export interface NeuronsServerOptions {
 export interface NeuronsServer {
   port: number;
   url: string;
+  /** Set when the disk watcher could not start (no recursive fs.watch, inotify limit...): hooks still work. */
+  watcherError?: string;
   close(): Promise<void>;
   broadcast(m: ServerMessage): void;
 }
@@ -109,6 +118,28 @@ function defaultWebDir(): string | undefined {
     fileURLToPath(new URL('../../dist/web', import.meta.url)), // source: src/server -> dist/web
   ];
   return candidates.find((d) => fs.existsSync(path.join(d, 'index.html')));
+}
+
+function defaultDocsDir(): string | undefined {
+  const candidates = [
+    fileURLToPath(new URL('./docs', import.meta.url)), // bundled: dist/cli.mjs -> dist/docs
+    fileURLToPath(new URL('../../dist/docs', import.meta.url)), // source: src/server -> dist/docs
+  ];
+  return candidates.find((d) => fs.existsSync(d));
+}
+
+/** Page routes served from the docs dir. */
+const DOC_PAGES: Record<string, string> = { '/help': 'guide.html', '/architecture': 'architecture.html' };
+/** Subdirs of the docs dir also reachable at the root, for the pages' relative fetches. */
+const DOC_ROOT_DIRS = ['/i18n/', '/img/'];
+
+/**
+ * `rel` (URL-decoded, "/"-separated) resolved inside `base`, or undefined when it escapes it.
+ */
+function safeJoin(base: string, rel: string): string | undefined {
+  const root = path.resolve(base);
+  const file = path.resolve(root, '.' + path.posix.normalize('/' + rel));
+  return file === root || file.startsWith(root + path.sep) ? file : undefined;
 }
 
 /** Serialized origin ("http://localhost:5173") or undefined when it does not parse. */
@@ -266,6 +297,7 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
   const live = o.mode === 'live';
   const defaultLog = path.join(path.resolve(o.root), STATE_DIR_NAME, 'events.jsonl');
   const webDir = o.webDir ?? defaultWebDir();
+  const docsDir = o.docsDir ?? defaultDocsDir();
 
   // --- state
   const ring: VizEvent[] = [];
@@ -509,6 +541,7 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
     }
   }
 
+  let watcherError: string | undefined;
   if (live && o.watch !== false) {
     const root = index.root;
     const watchOpts: Parameters<typeof startWatcher>[0] = {
@@ -520,7 +553,14 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
     };
     if (o.coalesceMs !== undefined) watchOpts.coalesceMs = o.coalesceMs;
     if (isGit) watchOpts.isIgnored = (rels) => isGitIgnored(root, rels);
-    watcher = startWatcher(watchOpts);
+    try {
+      watcher = startWatcher(watchOpts);
+    } catch (err) {
+      // fs.watch can throw at start: ENOSPC (Linux inotify watch limit), EMFILE, or no
+      // recursive support on this platform. The hooks alone still drive the view.
+      watcherError = (err as Error).message;
+      onError(err);
+    }
   }
 
   // --- http
@@ -534,22 +574,69 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
     }
   }
 
+  /** Sends a file that exists (`st` from statSync). */
+  function sendFile(res: http.ServerResponse, file: string, size: number, headOnly: boolean): void {
+    const type = MIME[path.extname(file).toLowerCase()] ?? 'application/octet-stream';
+    const isHtml = type.startsWith('text/html');
+    res.writeHead(200, {
+      'content-type': type,
+      'content-length': size,
+      'cache-control': isHtml ? 'no-cache' : 'public, max-age=3600',
+      'x-content-type-options': 'nosniff',
+    });
+    if (headOnly) {
+      res.end();
+      return;
+    }
+    const stream = fs.createReadStream(file);
+    stream.on('error', () => res.destroy());
+    stream.pipe(res);
+  }
+
+  /**
+   * The docs routes (see the header). Returns false when `pathname` is not one of them, or
+   * is an /i18n/ or /img/ path the docs dir does not have (the web UI gets a chance then).
+   */
+  function serveDocs(pathname: string, res: http.ServerResponse, headOnly: boolean): boolean {
+    const page = DOC_PAGES[pathname];
+    const underDocs = pathname.startsWith('/docs/');
+    const rootDir = DOC_ROOT_DIRS.some((d) => pathname.startsWith(d));
+    if (page === undefined && !underDocs && !rootDir) return false;
+    let rel: string;
+    try {
+      rel = page ?? decodeURIComponent(underDocs ? pathname.slice('/docs'.length) : pathname);
+    } catch {
+      sendText(res, 400, t('server.badPath'));
+      return true;
+    }
+    const file = docsDir ? safeJoin(docsDir, rel) : undefined;
+    const st = file ? fs.statSync(file, { throwIfNoEntry: false }) : undefined;
+    if (file && st?.isFile()) {
+      sendFile(res, file, st.size, headOnly);
+      return true;
+    }
+    if (rootDir) return false;
+    sendText(res, 404, page ? t('server.docsMissing') : t('server.notFound'));
+    return true;
+  }
+
   function serveStatic(pathname: string, res: http.ServerResponse, headOnly: boolean): void {
+    if (serveDocs(pathname, res, headOnly)) return;
     if (!webDir) {
-      sendText(res, 404, 'La interfaz no está compilada. Ejecutá npm run build:web.');
+      sendText(res, 404, t('server.webMissing'));
       return;
     }
     let rel: string;
     try {
       rel = decodeURIComponent(pathname);
     } catch {
-      sendText(res, 400, 'Ruta inválida.');
+      sendText(res, 400, t('server.badPath'));
       return;
     }
     const base = path.resolve(webDir);
-    let file = path.resolve(base, '.' + path.posix.normalize('/' + rel));
-    if (file !== base && !file.startsWith(base + path.sep)) {
-      sendText(res, 404, 'No encontrado.');
+    let file = safeJoin(base, rel);
+    if (file === undefined) {
+      sendText(res, 404, t('server.notFound'));
       return;
     }
     let st = fs.statSync(file, { throwIfNoEntry: false });
@@ -562,25 +649,11 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
       file = path.join(base, 'index.html');
       st = fs.statSync(file, { throwIfNoEntry: false });
       if (!st?.isFile()) {
-        sendText(res, 404, 'No encontrado.');
+        sendText(res, 404, t('server.notFound'));
         return;
       }
     }
-    const type = MIME[path.extname(file).toLowerCase()] ?? 'application/octet-stream';
-    const isHtml = type.startsWith('text/html');
-    res.writeHead(200, {
-      'content-type': type,
-      'content-length': st.size,
-      'cache-control': isHtml ? 'no-cache' : 'public, max-age=3600',
-      'x-content-type-options': 'nosniff',
-    });
-    if (headOnly) {
-      res.end();
-      return;
-    }
-    const stream = fs.createReadStream(file);
-    stream.on('error', () => res.destroy());
-    stream.pipe(res);
+    sendFile(res, file, st.size, headOnly);
   }
 
   function handleHook(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -627,13 +700,13 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
     try {
       pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
     } catch {
-      sendText(res, 400, 'Solicitud inválida.');
+      sendText(res, 400, t('server.badRequest'));
       return;
     }
 
     if (pathname === '/hook') {
       if (method !== 'POST') {
-        sendText(res, 405, 'Método no permitido.');
+        sendText(res, 405, t('server.methodNotAllowed'));
         return;
       }
       handleHook(req, res);
@@ -641,11 +714,11 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
     }
 
     if (!isLoopbackHost(req.headers.host)) {
-      sendText(res, 403, 'Host no permitido.');
+      sendText(res, 403, t('server.hostForbidden'));
       return;
     }
     if (method !== 'GET' && method !== 'HEAD') {
-      sendText(res, 405, 'Método no permitido.');
+      sendText(res, 405, t('server.methodNotAllowed'));
       return;
     }
     switch (pathname) {
@@ -661,7 +734,7 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
       case '/api/log':
         handleLog(res).catch((err) => {
           onError(err);
-          if (!res.headersSent) sendText(res, 500, 'Error al leer el registro.');
+          if (!res.headersSent) sendText(res, 500, t('server.logError'));
         });
         return;
       default:
@@ -674,7 +747,7 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
       handle(req, res);
     } catch (err) {
       onError(err);
-      if (!res.headersSent) sendText(res, 500, 'Error interno.');
+      if (!res.headersSent) sendText(res, 500, t('server.internal'));
       else res.destroy();
     }
   });
@@ -746,6 +819,7 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
   return {
     port: actualPort,
     url: `http://${urlHost}:${actualPort}`,
+    ...(watcherError !== undefined ? { watcherError } : {}),
     broadcast,
     close(): Promise<void> {
       closing ??= (async () => {

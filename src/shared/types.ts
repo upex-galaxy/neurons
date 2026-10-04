@@ -18,7 +18,9 @@ export type Action =
   | 'session_end'
   | 'batch_end'
   | 'compact'
-  | 'tool';
+  | 'tool'
+  | 'skill'
+  | 'mcp';
 
 export type Phase = 'pre' | 'post' | 'fail' | 'info';
 
@@ -32,7 +34,18 @@ export const FILE_ACTIONS: readonly Action[] = [
   'search',
   'bash',
   'context_load',
+  'mcp',
 ];
+
+/** Which kind of tool a tool event comes from. */
+export interface ToolInfo {
+  /** builtin: Claude Code's own tools (Read, Bash, Agent...). mcp: `mcp__<server>__<tool>`. skill: the Skill tool. */
+  kind: 'builtin' | 'mcp' | 'skill';
+  /** builtin: tool_name. mcp: the tool part of `mcp__<server>__<tool>`. skill: tool_input.skill. */
+  name: string;
+  /** mcp only: the MCP server name. */
+  server?: string;
+}
 
 export interface VizEvent {
   /** Server-generated id (crypto.randomUUID). */
@@ -67,6 +80,28 @@ export interface VizEvent {
    * rewritten to the equivalent paths in the main repo; the event never changes the tree.
    */
   worktree?: string;
+  /**
+   * PermissionDenied: Claude Code was not allowed to run the call (phase "fail"). The viewer
+   * names it in its own language; `detail` keeps what the call was about.
+   */
+  denied?: boolean;
+  /** Every tool event (Pre/Post/Failure/PermissionDenied): which tool it is. */
+  tool?: ToolInfo;
+  /** Bash: distinct program names the command runs (git, npm, gh...), at most 8. */
+  cli?: string[];
+  /**
+   * Bash: the command, at most 2000 chars, newlines kept, with heredoc bodies cut and
+   * quoted literals redacted when it writes files or runs inline code. Never file content.
+   */
+  command?: string;
+  /** Bash and Agent: tool_input.description (Claude's own explanation), at most 300 chars. */
+  description?: string;
+  /** PostToolUse / PostToolUseFailure: duration_ms. */
+  durationMs?: number;
+  /** PostToolUseFailure: the first line of the error, at most 200 chars. */
+  error?: string;
+  /** Searches: grep/rg pattern, find -name glob, Glob/Grep pattern. */
+  pattern?: string;
 }
 
 export type NodeKind = 'dir' | 'file';
@@ -139,6 +174,8 @@ export const ACTION_COLORS: Record<Action, string> = {
   session_end: '#64748b',
   batch_end: '#64748b',
   compact: '#c084fc',
+  skill: '#fb923c',
+  mcp: '#2dd4bf',
 };
 
 export const FAIL_COLOR = '#6b7280';

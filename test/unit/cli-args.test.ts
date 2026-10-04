@@ -3,6 +3,10 @@ import { describe, expect, it } from 'vitest';
 import { route } from '../../src/cli/args.ts';
 import { CliError } from '../../src/cli/output.ts';
 import { DEFAULT_PORT } from '../../src/shared/types.ts';
+import { setLang } from '../../src/i18n.ts';
+
+// The messages asserted below are the Spanish ones.
+setLang('es');
 
 const dirs = new Set(['api', '../otro', '/abs/repo', 'start']);
 const isDir = (p: string) => dirs.has(p);

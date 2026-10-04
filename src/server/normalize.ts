@@ -5,10 +5,11 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Action, Phase, SessionInfo, VizEvent } from '../shared/types.ts';
-import { classifyBash, extractPathsFromOutput, type BashClassification } from './bash.ts';
+import type { Action, Phase, SessionInfo, ToolInfo, VizEvent } from '../shared/types.ts';
+import { bashPrograms, classifyBash, extractPathsFromOutput, type BashClassification } from './bash.ts';
 import { splitWorktreeRel, toPosix, type PathResolver, type ResolvedPath } from './paths.ts';
 import { isAlwaysExcluded, type TreeIndex } from './tree.ts';
+import { t } from '../i18n.ts';
 
 export interface HookPayload {
   hook_event_name: string;
@@ -41,6 +42,10 @@ export interface NormalizerOptions {
 
 const DETAIL_MAX = 120;
 const SECONDARY_MAX = 200;
+const COMMAND_MAX = 2000;
+const DESCRIPTION_MAX = 300;
+const ERROR_MAX = 200;
+const PATTERN_MAX = 200;
 /** Cap for per-tool_use_id memory (Pre seen, Post never arrived). */
 const PENDING_MAX = 2000;
 
@@ -52,10 +57,47 @@ function obj(v: unknown): Record<string, unknown> | undefined {
   return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 }
 
-/** Collapses whitespace to one line and truncates to 120 chars. */
-export function shortDetail(s: string): string {
+/** Collapses whitespace to one line and truncates to `max` chars (default 120). */
+export function shortDetail(s: string, max = DETAIL_MAX): string {
   const line = s.replace(/\s+/g, ' ').trim();
-  return line.length > DETAIL_MAX ? line.slice(0, DETAIL_MAX - 1) + '…' : line;
+  return line.length > max ? line.slice(0, max - 1) + '…' : line;
+}
+
+/**
+ * The first non-empty line of a tool error, without Claude Code's wrapper tags
+ * (`<tool_use_error>`), at most 200 chars. The lines after it (stderr, the string an Edit
+ * did not find) never leave the server.
+ */
+export function errorLine(error: string): string | undefined {
+  for (const raw of error.split(/\r?\n/)) {
+    const line = raw.replace(/<\/?[a-z][a-z0-9_-]*>/gi, ' ').replace(/\s+/g, ' ').trim();
+    if (line !== '') return line.length > ERROR_MAX ? line.slice(0, ERROR_MAX - 1) + '…' : line;
+  }
+  return undefined;
+}
+
+/**
+ * Tool identity from tool_name: `Skill` (with tool_input.skill), `mcp__<server>__<tool>`
+ * (server from the payload's mcp_server.name when present, since tool names carry it
+ * normalized), or a builtin.
+ */
+export function toolInfo(toolName: string, input: Record<string, unknown>, mcpServer: unknown): ToolInfo {
+  // "?" (no word, so no language) when the payload does not name the skill, as for MCP servers.
+  if (toolName === 'Skill') return { kind: 'skill', name: str(input.skill) ?? '?' };
+  if (toolName.startsWith('mcp__')) {
+    const rest = toolName.slice('mcp__'.length);
+    const named = str(obj(mcpServer)?.name);
+    if (named) {
+      const prefix = named.replace(/[^A-Za-z0-9_-]/g, '_') + '__';
+      const sep = rest.indexOf('__');
+      const name = rest.startsWith(prefix) ? rest.slice(prefix.length) : sep > 0 ? rest.slice(sep + 2) : rest;
+      return { kind: 'mcp', name: name || rest, server: named };
+    }
+    const sep = rest.indexOf('__');
+    if (sep > 0) return { kind: 'mcp', name: rest.slice(sep + 2) || rest, server: rest.slice(0, sep) };
+    return { kind: 'mcp', name: rest, server: rest };
+  }
+  return { kind: 'builtin', name: toolName };
 }
 
 /**
@@ -70,12 +112,12 @@ const TAG_FRAGMENT_RE = /<\/?[a-z][a-z0-9_-]*(?:\s+[\w:.-]+=(?:"[^"]*"|'[^']*'|[
 /**
  * The turn_start detail for a UserPromptSubmit prompt. Claude Code also submits prompts of
  * its own (`<task-notification>` when a background subagent finishes): those get a fixed
- * label, never their raw text. A typed prompt keeps its first 120 chars without tags.
+ * label in the server's language (src/i18n), never their raw text. A typed prompt keeps its first 120 chars without tags.
  */
 export function promptDetail(prompt: string): string | undefined {
   const trimmed = prompt.trim();
   const injected = INJECTED_PROMPT_RE.exec(trimmed);
-  if (injected) return injected[1] === 'task-notification' ? 'notificación de tarea en segundo plano' : 'notificación del sistema';
+  if (injected) return t(injected[1] === 'task-notification' ? 'event.taskNotification' : 'event.systemNotification');
   const detail = shortDetail(trimmed.replace(TAG_FRAGMENT_RE, ' '));
   return detail === '' ? undefined : detail;
 }
@@ -144,6 +186,261 @@ export function bashDetail(command: string): string {
       .join('');
   }
   return shortDetail(dropped ? `${s} ${REDACTED}` : s);
+}
+
+// --- Bash command -> command (multi-line)
+// The full command for the detail panel, under the same rule as bashDetail: heredoc bodies
+// are cut (a "…" line stands for each), and in a statement that writes files or runs
+// inline code every quoted literal becomes "…", echo/printf arguments too. Statements are
+// split at newlines outside quotes and $( ), so a literal spanning lines is judged with
+// the redirect that follows it. A literal never closed is cut at its opening quote.
+
+type ShellCtx = "'" | '"' | '$(' | '(' | '`';
+
+/** End (exclusive) of the double-quoted literal that opens at `i`. */
+function skipDouble(s: string, i: number): number {
+  let j = i + 1;
+  while (j < s.length) {
+    const c = s[j];
+    if (c === '\\') j += 2;
+    else if (c === '"') return j + 1;
+    else if (c === '$' && s[j + 1] === '(') j = skipParen(s, j + 1);
+    else if (c === '`') {
+      j++;
+      while (j < s.length && s[j] !== '`') j += s[j] === '\\' ? 2 : 1;
+      j++;
+    } else j++;
+  }
+  return s.length;
+}
+
+/** End (exclusive) of the parenthesized group that opens at `i` (s[i] === '('). */
+function skipParen(s: string, i: number): number {
+  let depth = 0;
+  let j = i;
+  while (j < s.length) {
+    const c = s[j];
+    if (c === '\\') {
+      j += 2;
+      continue;
+    }
+    if (c === "'") {
+      const k = s.indexOf("'", j + 1);
+      j = k === -1 ? s.length : k + 1;
+      continue;
+    }
+    if (c === '"') {
+      j = skipDouble(s, j);
+      continue;
+    }
+    if (c === '(') depth++;
+    else if (c === ')') {
+      depth--;
+      if (depth === 0) return j + 1;
+    }
+    j++;
+  }
+  return s.length;
+}
+
+/** End (exclusive) of the single-quoted literal at `i`; `ansi` for $'...' (backslash escapes). */
+function skipSingle(s: string, i: number, ansi: boolean): number {
+  let j = i + 1;
+  while (j < s.length) {
+    if (ansi && s[j] === '\\') j += 2;
+    else if (s[j] === "'") return j + 1;
+    else j++;
+  }
+  return s.length;
+}
+
+/** Every quoted literal ('...', $'...', "...", across lines) reduced to its quotes around "…". */
+function redactQuoted(s: string): string {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i] as string;
+    if (c === '\\') {
+      out += s.slice(i, i + 2);
+      i += 2;
+    } else if (c === "'") {
+      i = skipSingle(s, i, out.endsWith('$'));
+      out += `'${REDACTED}'`;
+    } else if (c === '"') {
+      i = skipDouble(s, i);
+      out += `"${REDACTED}"`;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
+/** `cmd <<< word`: the word (quoted or not) is stdin content. */
+function redactHereStrings(s: string): string {
+  let out = '';
+  let i = 0;
+  for (let k = s.indexOf('<<<', i); k !== -1; k = s.indexOf('<<<', i)) {
+    out += s.slice(i, k) + `<<< ${REDACTED}`;
+    let j = k + 3;
+    while (s[j] === ' ' || s[j] === '\t') j++;
+    if (s[j] === "'") j = skipSingle(s, j, s[j - 1] === '$');
+    else if (s[j] === '"') j = skipDouble(s, j);
+    else if (s[j] === '$' && s[j + 1] === "'") j = skipSingle(s, j + 1, true);
+    else while (j < s.length && !/\s/.test(s[j] as string)) j++;
+    i = j;
+  }
+  return out + s.slice(i);
+}
+
+function redactStatement(stmt: string): string {
+  let s = stmt;
+  const flat = s.replace(/\\\n/g, ' ');
+  const writes = WRITE_REDIRECT_RE.test(flat) || TEE_RE.test(flat) || SED_INPLACE_RE.test(flat);
+  if (writes || INLINE_CODE_RE.test(flat)) s = redactQuoted(s);
+  s = redactHereStrings(s);
+  if (writes) {
+    s = s
+      .split(/(\|\||&&|[|;&])/)
+      .map((seg) =>
+        seg.replace(/^(\s*(?:sudo\s+)?(?:echo|printf))((?:[ \t]+[^\s<>|;&]+)+)/, (_m, cmd: string) => `${cmd} ${REDACTED}`),
+      )
+      .join('');
+  }
+  return s;
+}
+
+/** A Bash command for display: newlines kept, at most 2000 chars, without the content it writes. */
+export function bashCommand(command: string): string {
+  const s = command.replace(/\r\n?/g, '\n');
+  const parts: string[] = [];
+  /** `ansi`: a $'...' literal, where a backslash escapes the next char (even a quote). */
+  const stack: { ctx: ShellCtx; at: number; ansi?: boolean }[] = [];
+  const heredocs: { delim: string; strip: boolean }[] = [];
+  let buf = '';
+  let i = 0;
+  const flush = (): void => {
+    const open = stack[0];
+    // A literal or substitution never closed swallows the rest: keep only its opener.
+    if (open) buf = buf.slice(0, open.at + open.ctx.length) + REDACTED;
+    parts.push(redactStatement(buf));
+    buf = '';
+    stack.length = 0;
+  };
+  while (i < s.length) {
+    const c = s[i] as string;
+    const next = s[i + 1];
+    const top = stack.at(-1)?.ctx;
+    if (c === '\n') {
+      buf += '\n';
+      i++;
+      // Heredoc bodies start on the next line, wherever the operator was (even inside "$( )").
+      for (const doc of heredocs.splice(0)) {
+        let closed = false;
+        while (i < s.length) {
+          const end = s.indexOf('\n', i);
+          const line = s.slice(i, end === -1 ? s.length : end);
+          i = end === -1 ? s.length : end + 1;
+          if ((doc.strip ? line.replace(/^\t+/, '') : line) === doc.delim) {
+            buf += `${REDACTED}\n${line}\n`;
+            closed = true;
+            break;
+          }
+        }
+        if (!closed) buf += `${REDACTED}\n`;
+      }
+      if (stack.length === 0) {
+        buf = buf.replace(/\n+$/, '');
+        flush();
+      }
+      continue;
+    }
+    if (top === "'") {
+      if (c === '\\' && stack.at(-1)?.ansi) {
+        buf += c + (next ?? '');
+        i += 2;
+        continue;
+      }
+      buf += c;
+      i++;
+      if (c === "'") stack.pop();
+      continue;
+    }
+    if (c === '\\') {
+      buf += c + (next ?? '');
+      i += 2;
+      continue;
+    }
+    if (top === '"') {
+      if (c === '"') stack.pop();
+      else if (c === '$' && next === '(') {
+        stack.push({ ctx: '$(', at: buf.length });
+        buf += '$(';
+        i += 2;
+        continue;
+      } else if (c === '`') stack.push({ ctx: '`', at: buf.length });
+      buf += c;
+      i++;
+      continue;
+    }
+    if (c === '#' && (buf === '' || /[\s;&|()]$/.test(buf))) {
+      // A comment runs to the end of the line; its quotes are not quotes.
+      const end = s.indexOf('\n', i);
+      const stop = end === -1 ? s.length : end;
+      buf += s.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (c === "'") {
+      stack.push(buf.endsWith('$') ? { ctx: c, at: buf.length, ansi: true } : { ctx: c, at: buf.length });
+    } else if (c === '"') {
+      stack.push({ ctx: c, at: buf.length });
+    } else if (c === '`') {
+      if (top === '`') stack.pop();
+      else stack.push({ ctx: '`', at: buf.length });
+    } else if (c === '$' && next === '(') {
+      stack.push({ ctx: '$(', at: buf.length });
+      buf += '$(';
+      i += 2;
+      continue;
+    } else if (c === '(') {
+      stack.push({ ctx: '(', at: buf.length });
+    } else if (c === ')') {
+      if (top === '(' || top === '$(') stack.pop();
+    } else if (c === '<' && next === '<' && s[i + 2] !== '<') {
+      // Heredoc operator: << or <<-, then the delimiter word (quotes removed).
+      let j = i + 2;
+      const strip = s[j] === '-';
+      if (strip) j++;
+      while (s[j] === ' ' || s[j] === '\t') j++;
+      let delim = '';
+      while (j < s.length && !/[\s;&|<>()]/.test(s[j] as string)) {
+        const d = s[j] as string;
+        if (d === "'" || d === '"') {
+          const k = s.indexOf(d, j + 1);
+          const end = k === -1 ? s.length : k;
+          delim += s.slice(j + 1, end);
+          j = end + 1;
+        } else if (d === '\\') {
+          delim += s[j + 1] ?? '';
+          j += 2;
+        } else {
+          delim += d;
+          j++;
+        }
+      }
+      if (delim !== '') heredocs.push({ delim, strip });
+      buf += s.slice(i, Math.min(j, s.length));
+      i = j;
+      continue;
+    }
+    buf += c;
+    i++;
+  }
+  if (buf !== '' || stack.length > 0) flush();
+  const out = parts.join('\n').replace(/^\n+|\s+$/g, '');
+  return out.length > COMMAND_MAX ? out.slice(0, COMMAND_MAX - 1) + '…' : out;
 }
 
 const GLOB_RE = /[*?[\]{}]/;
@@ -306,7 +603,7 @@ export class Normalizer {
   // ---------------------------------------------------------------- tools
 
   #tool(p: HookPayload, ts: number, eventName: string): VizEvent[] {
-    const toolName = str(p.tool_name) ?? 'unknown';
+    const toolName = str(p.tool_name) ?? '?';
     const toolUseId = str(p.tool_use_id);
     const input = obj(p.tool_input) ?? {};
     const response = obj(p.tool_response);
@@ -315,6 +612,19 @@ export class Normalizer {
       eventName === 'PreToolUse' ? 'pre' : eventName === 'PostToolUse' ? 'post' : 'fail';
     const denied = eventName === 'PermissionDenied';
     const finished = phase !== 'pre';
+    const tool = toolInfo(toolName, input, p.mcp_server);
+
+    // Metadata shared by every event of this payload. Never file content: the command is
+    // redacted, the error keeps its first line only.
+    const extra: Pick<VizEvent, 'cli' | 'command' | 'description' | 'durationMs' | 'error' | 'pattern'> = {};
+    const duration = p.duration_ms;
+    if (finished && !denied && typeof duration === 'number' && Number.isFinite(duration) && duration >= 0) {
+      extra.durationMs = Math.round(duration);
+    }
+    if (eventName === 'PostToolUseFailure' && typeof p.error === 'string') {
+      const line = errorLine(p.error);
+      if (line) extra.error = line;
+    }
 
     const base = { toolName, toolUseId };
     const emit = (plan: ToolPlan): VizEvent => {
@@ -323,15 +633,41 @@ export class Normalizer {
         phase,
         paths: plan.paths,
         outside: plan.outside,
-        detail: denied ? 'denied' : plan.detail,
+        detail: plan.detail,
         secondary: plan.secondary,
         fromPaths: plan.fromPaths,
         worktree: plan.worktree,
       });
       ev.toolName = base.toolName;
       if (base.toolUseId) ev.toolUseId = base.toolUseId;
+      // The viewer words it in its own language (never a fixed English word in `detail`).
+      if (denied) ev.denied = true;
+      ev.tool = { ...tool };
+      if (extra.cli) ev.cli = [...extra.cli];
+      if (extra.command !== undefined) ev.command = extra.command;
+      if (extra.description !== undefined) ev.description = extra.description;
+      if (extra.pattern !== undefined) ev.pattern = extra.pattern;
+      if (extra.durationMs !== undefined) ev.durationMs = extra.durationMs;
+      if (extra.error !== undefined) ev.error = extra.error;
       return ev;
     };
+    const describe = (): void => {
+      const desc = str(input.description);
+      const d = desc && shortDetail(desc, DESCRIPTION_MAX);
+      if (d) extra.description = d;
+    };
+    const searchPattern = (pattern: string | undefined): void => {
+      const pat = pattern && shortDetail(pattern, PATTERN_MAX);
+      if (pat) extra.pattern = pat;
+    };
+
+    if (tool.kind === 'skill') {
+      return [emit({ action: 'skill', paths: [], outside: [], detail: shortDetail(tool.name) })];
+    }
+    if (tool.kind === 'mcp') {
+      const placed = this.#genericPlace(input, cwd);
+      return [emit({ action: 'mcp', ...placed, detail: shortDetail(`${tool.server ?? '?'}/${tool.name}`) })];
+    }
 
     switch (toolName) {
       case 'Read':
@@ -345,24 +681,38 @@ export class Normalizer {
         return [emit(this.#write(input, response, cwd, phase, toolUseId, finished))];
       case 'Glob':
       case 'Grep':
+        searchPattern(str(input.pattern));
         return [emit(this.#globGrep(input, response, cwd, phase))];
-      case 'Bash':
-        return this.#bash(input, response, cwd, phase, toolUseId, finished).map(emit);
+      case 'Bash': {
+        const command = str(input.command);
+        if (command) {
+          const programs = bashPrograms(command);
+          if (programs.length > 0) extra.cli = programs;
+          const shown = bashCommand(command);
+          if (shown !== '') extra.command = shown;
+        }
+        describe();
+        const { plans, cls } = this.#bash(input, response, cwd, phase, toolUseId, finished);
+        if (cls.kind === 'search' || cls.kind === 'delete') searchPattern(cls.pattern);
+        return plans.map(emit);
+      }
       case 'Agent':
       case 'Task': {
+        describe();
         const desc = str(input.description);
         return [emit({ action: 'tool', paths: [], outside: [], detail: desc && shortDetail(desc) })];
       }
-      default: {
-        const filePath = str(input.file_path);
-        let placed: Placed = filePath ? this.#place([filePath], cwd) : { paths: [], outside: [] };
-        if (!filePath) {
-          const generic = str(input.path);
-          if (generic) placed = { ...this.#place([generic], cwd), outside: [] };
-        }
-        return [emit({ action: 'tool', ...placed })];
-      }
+      default:
+        return [emit({ action: 'tool', ...this.#genericPlace(input, cwd) })];
     }
+  }
+
+  /** file_path (inside or outside the repo) or, failing that, a `path` inside it. */
+  #genericPlace(input: Record<string, unknown>, cwd: string | undefined): Placed {
+    const filePath = str(input.file_path);
+    if (filePath) return this.#place([filePath], cwd);
+    const generic = str(input.path);
+    return generic ? { ...this.#place([generic], cwd), outside: [] } : { paths: [], outside: [] };
   }
 
   #write(
@@ -413,13 +763,25 @@ export class Normalizer {
     phase: Phase,
     toolUseId: string | undefined,
     finished: boolean,
-  ): ToolPlan[] {
+  ): { plans: ToolPlan[]; cls: BashClassification } {
     const command = str(input.command) ?? '';
-    const detail = command ? bashDetail(command) : undefined;
     let cls = toolUseId ? this.#bashPre.get(toolUseId) : undefined;
     if (!cls) cls = classifyBash(command);
     if (phase === 'pre' && toolUseId) this.#remember(this.#bashPre, toolUseId, cls);
     if (finished && toolUseId) this.#bashPre.delete(toolUseId);
+    return { plans: this.#bashPlansFor(cls, command, response, cwd, phase, toolUseId, finished), cls };
+  }
+
+  #bashPlansFor(
+    cls: BashClassification,
+    command: string,
+    response: Record<string, unknown> | undefined,
+    cwd: string | undefined,
+    phase: Phase,
+    toolUseId: string | undefined,
+    finished: boolean,
+  ): ToolPlan[] {
+    const detail = command ? bashDetail(command) : undefined;
 
     const argBase = cls.cdDir !== undefined ? this.#resolver.resolve(cls.cdDir, cwd).abs : cwd;
 

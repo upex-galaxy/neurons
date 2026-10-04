@@ -3,6 +3,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { t } from '../i18n.ts';
 import { fail } from './output.ts';
 
 /** Runs `git rev-parse --show-toplevel` in `dir` (execFile, no shell); undefined outside git. */
@@ -22,6 +23,14 @@ export const gitToplevel: GitToplevel = (dir) => {
   }
 };
 
+/**
+ * On Windows the native realpath, which also gives the on-disk case and an upper-case
+ * drive letter: `neu stop` from `c:\repo` must find the viewer started from `C:\Repo`.
+ */
+function realpath(p: string): string {
+  return process.platform === 'win32' ? fs.realpathSync.native(p) : fs.realpathSync(p);
+}
+
 export interface RepoRoot {
   /** Real path of the directory the command works on. */
   root: string;
@@ -33,22 +42,22 @@ export interface RepoRoot {
 
 /**
  * Real path of `arg` (default: the cwd), moved up to its git top level when it is inside
- * a work tree. Fails in Spanish when the directory does not exist or is a file.
+ * a work tree. Fails when the directory does not exist or is a file.
  */
 export function resolveRepoRoot(arg: string | undefined, git: GitToplevel = gitToplevel): RepoRoot {
   const abs = path.resolve(arg ?? process.cwd());
   let given: string;
   try {
-    given = fs.realpathSync(abs);
+    given = realpath(abs);
   } catch {
-    fail(`No existe el directorio ${abs}.`);
+    fail(t('repo.missingDir', { path: abs }));
   }
-  if (!fs.statSync(given).isDirectory()) fail(`${abs} no es un directorio.`);
+  if (!fs.statSync(given).isDirectory()) fail(t('repo.notDir', { path: abs }));
   const top = git(given);
   if (top === undefined) return { root: given, given, isGit: false };
   let root: string;
   try {
-    root = fs.realpathSync(top);
+    root = realpath(top);
   } catch {
     return { root: given, given, isGit: false };
   }

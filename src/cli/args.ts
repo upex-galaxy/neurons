@@ -4,6 +4,7 @@
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { DEFAULT_PORT } from '../shared/types.ts';
+import { langOption, t, type Lang } from '../i18n.ts';
 import { fail } from './output.ts';
 
 export const COMMANDS = ['start', 'install', 'uninstall', 'replay', 'doctor', 'ls', 'stop', 'open', 'help'] as const;
@@ -20,6 +21,8 @@ export interface Options {
   all: boolean;
   /** stop: SIGKILL a viewer that did not exit, then uninstall its hooks. */
   force: boolean;
+  /** --lang, when given (main() applies it before routing, see detectLang). */
+  lang?: Lang;
 }
 
 export type Route =
@@ -29,7 +32,7 @@ export type Route =
 
 function parsePort(v: string | undefined): number {
   if (v === undefined) return DEFAULT_PORT;
-  if (!/^\d+$/.test(v) || Number(v) > 65535) fail(`Puerto inválido: "${v}". Usá un número entre 0 y 65535.`);
+  if (!/^\d+$/.test(v) || Number(v) > 65535) fail(t('args.badPort', { value: v }));
   return Number(v);
 }
 
@@ -68,7 +71,7 @@ function closestCommand(word: string): Command | undefined {
  * - no command -> `start` on the current directory;
  * - `help`, `--help`, `-h` -> help; `--version`, `-v` -> version;
  * - a word that is not a command but names an existing directory -> `start <dir>`;
- * - anything else -> CliError with a Spanish hint (a file gets its own: it is not a folder,
+ * - anything else -> CliError with a hint (a file gets its own: it is not a folder,
  *   and a .jsonl is probably a log for `replay`).
  * `isDirectory` and `isFile` receive the word as typed (relative to the cwd).
  */
@@ -89,12 +92,15 @@ export function route(argv: string[], isDirectory: (p: string) => boolean, isFil
         force: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
+        lang: { type: 'string' },
       },
     });
   } catch (e) {
-    fail(`${(e as Error).message}\nEjecutá "neu --help" para ver las opciones.`);
+    fail(t('args.parseError', { error: (e as Error).message }));
   }
   const v = parsed.values;
+  const lang = langOption(v.lang);
+  if (v.lang !== undefined && lang === undefined) fail(t('args.badLang', { value: v.lang }));
   if (v.version === true) return { kind: 'version' };
   const [first, ...rest] = parsed.positionals;
   if (v.help === true || first === 'help') return { kind: 'help' };
@@ -115,14 +121,14 @@ export function route(argv: string[], isDirectory: (p: string) => boolean, isFil
     const looksLikePath = first.includes('/') || first.includes(path.sep) || first.startsWith('.') || first.startsWith('~');
     const hints: string[] = [];
     if (isFile(first)) {
-      hints.push(`${path.resolve(first)} es un archivo, no una carpeta.`);
-      if (first.endsWith('.jsonl')) hints.push(`Si es un registro grabado, reproducilo con: neu replay ${first}`);
+      hints.push(t('args.isFile', { path: path.resolve(first) }));
+      if (first.endsWith('.jsonl')) hints.push(t('args.replayHint', { arg: first }));
     } else {
-      if (near) hints.push(`¿Quisiste decir "neu ${near}"?`);
-      if (looksLikePath || !near) hints.push(`Si es un repositorio, la carpeta ${path.resolve(first)} no existe.`);
+      if (near) hints.push(t('args.didYouMean', { command: near }));
+      if (looksLikePath || !near) hints.push(t('args.dirMissing', { path: path.resolve(first) }));
     }
-    hints.push('Ejecutá "neu --help" para ver los comandos.');
-    fail(`Comando desconocido: "${first}".\n${hints.join('\n')}`);
+    hints.push(t('args.seeHelp'));
+    fail(`${t('args.unknown', { word: first })}\n${hints.join('\n')}`);
   }
 
   return {
@@ -138,6 +144,7 @@ export function route(argv: string[], isDirectory: (p: string) => boolean, isFil
       strictPort: v['strict-port'] === true,
       all: v.all === true,
       force: v.force === true,
+      ...(lang ? { lang } : {}),
     },
   };
 }

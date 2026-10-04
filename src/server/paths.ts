@@ -62,10 +62,21 @@ function privateVariants(p: string): string[] {
   return out;
 }
 
-function expandHome(p: string): string {
+function expandHome(p: string, P: typeof path.posix): string {
   if (p === '~') return os.homedir();
-  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
+  if (p.startsWith('~/') || p.startsWith('~\\')) return P.join(os.homedir(), p.slice(2));
   return p;
+}
+
+/**
+ * Windows: a Git Bash / MSYS / Cygwin spelling of a drive path (`/c/Users/me`,
+ * `/cygdrive/c/Users/me`) as the Windows path (`C:\Users\me`). Claude Code runs Bash
+ * through Git Bash there, so commands can carry either form.
+ */
+export function fromMsysPath(p: string): string {
+  const m = /^\/(?:cygdrive\/)?([a-zA-Z])(?=\/|$)(.*)$/.exec(p);
+  if (!m) return p;
+  return `${(m[1] as string).toUpperCase()}:${(m[2] as string) === '' ? '\\' : (m[2] as string).replace(/\//g, '\\')}`;
 }
 
 function safeRealpath(p: string): string {
@@ -76,31 +87,53 @@ function safeRealpath(p: string): string {
   }
 }
 
-export function createPathResolver(root: string): PathResolver {
-  const rawRoot = path.resolve(root);
-  const realRoot = safeRealpath(rawRoot);
+export interface PathResolverOptions {
+  /** Path rules to follow (default: this process's). Tests pass 'win32' on any OS. */
+  platform?: NodeJS.Platform;
+  /** Realpath of the root (default: fs.realpathSync.native, falling back to the path as given). */
+  realpath?: (p: string) => string;
+}
+
+/**
+ * On Windows, paths compare case-insensitively (NTFS is, and drive letters come as `c:` or
+ * `C:` depending on who built the path) and the MSYS spellings are accepted; elsewhere they
+ * compare exactly.
+ */
+export function createPathResolver(root: string, opts: PathResolverOptions = {}): PathResolver {
+  const platform = opts.platform ?? process.platform;
+  const win = platform === 'win32';
+  const P = platform === process.platform ? path : win ? path.win32 : path.posix;
+  const rawRoot = P.resolve(win ? fromMsysPath(root) : root);
+  const realRoot = (opts.realpath ?? safeRealpath)(rawRoot);
   const aliases = new Set<string>();
-  for (const r of [realRoot, rawRoot]) for (const v of privateVariants(r)) aliases.add(v);
+  for (const r of [realRoot, rawRoot]) for (const v of win ? [r] : privateVariants(r)) aliases.add(v);
   // Longest first so a nested alias never shadows a longer one.
   const aliasList = [...aliases].sort((a, b) => b.length - a.length);
+  const fold = (s: string): string => (win ? s.toLowerCase() : s);
+  const folded = aliasList.map((alias) => {
+    const prefix = alias.endsWith(P.sep) ? alias : alias + P.sep;
+    return { alias: fold(alias), prefix: fold(prefix) };
+  });
 
   function toRootRel(abs: string): string | undefined {
-    for (const alias of aliasList) {
-      if (abs === alias) return '';
-      const prefix = alias.endsWith(path.sep) ? alias : alias + path.sep;
-      if (abs.startsWith(prefix)) return toPosix(abs.slice(prefix.length));
+    const key = fold(abs);
+    for (const { alias, prefix } of folded) {
+      if (key === alias) return '';
+      if (key.startsWith(prefix)) return toPosix(abs.slice(prefix.length));
     }
     return undefined;
   }
 
+  const prepare = (p: string): string => expandHome(win ? fromMsysPath(p) : p, P);
+
   return {
     root: realRoot,
     resolve(p: string, cwd?: string): ResolvedPath {
-      const base = cwd ? path.resolve(realRoot, expandHome(cwd)) : realRoot;
-      const abs = path.resolve(base, expandHome(p));
+      const base = cwd ? P.resolve(realRoot, prepare(cwd)) : realRoot;
+      const abs = P.resolve(base, prepare(p));
       const rel = toRootRel(abs);
       if (rel === undefined) return { abs, inside: false };
-      const canonical = rel === '' ? realRoot : path.join(realRoot, rel);
+      const canonical = rel === '' ? realRoot : P.join(realRoot, rel);
       return { abs: canonical, rel, inside: true };
     },
   };

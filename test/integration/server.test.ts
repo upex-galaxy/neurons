@@ -885,6 +885,61 @@ describe('HTTP routes', () => {
     expect(wrongMethod.redirected).toBe(false);
   });
 
+  it('serves /help and /architecture from the docs dir (200 html), their i18n and images; 404 when missing, never a redirect', async () => {
+    const docsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-docs-'));
+    tmpDirs.push(docsDir);
+    fs.writeFileSync(path.join(docsDir, 'guide.html'), '<!doctype html><title>Guide</title>');
+    fs.writeFileSync(path.join(docsDir, 'architecture.html'), '<!doctype html><title>Architecture</title>');
+    fs.mkdirSync(path.join(docsDir, 'i18n'));
+    fs.writeFileSync(path.join(docsDir, 'i18n', 'guide.en.json'), '{"title":"Guide"}');
+    fs.mkdirSync(path.join(docsDir, 'img'));
+    fs.writeFileSync(path.join(docsDir, 'img', 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const { server } = await start({ watch: false, docsDir });
+    const get = (p: string, init?: RequestInit) => fetch(server.url + p, { redirect: 'manual', ...init });
+
+    for (const [route, title] of [
+      ['/help', 'Guide'],
+      ['/architecture', 'Architecture'],
+    ] as const) {
+      const res = await get(route);
+      expect(res.status).toBe(200);
+      expect(res.redirected).toBe(false);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      expect(res.headers.get('location')).toBeNull();
+      expect(await res.text()).toContain(`<title>${title}</title>`);
+    }
+    const head = await get('/help', { method: 'HEAD' });
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe('');
+
+    // The pages fetch their dictionaries relative to /help (-> /i18n/...) or through /docs/.
+    for (const p of ['/i18n/guide.en.json', '/docs/i18n/guide.en.json']) {
+      const res = await get(p);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('application/json');
+      expect(await res.json()).toEqual({ title: 'Guide' });
+    }
+    expect((await get('/img/shot.png')).headers.get('content-type')).toBe('image/png');
+    expect((await get('/docs/img/shot.png')).status).toBe(200);
+    expect((await get('/docs/guide.html')).status).toBe(200);
+    expect((await get('/docs/nope.html')).status).toBe(404);
+    expect(await (await get('/docs/..%2f..%2fetc%2fpasswd')).text()).not.toContain('root:');
+    // Not in the docs dir: the web UI (SPA fallback) answers as before.
+    expect(await (await get('/i18n/missing.json')).text()).toContain('<title>Neurons</title>');
+    expect((await get('/help', { method: 'POST' })).status).toBe(405);
+
+    // Without the pages: 404, no redirect, no SPA fallback.
+    const emptyDocs = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-docs-empty-'));
+    tmpDirs.push(emptyDocs);
+    const { server: bare } = await start({ watch: false, docsDir: emptyDocs });
+    for (const route of ['/help', '/architecture']) {
+      const res = await fetch(bare.url + route, { redirect: 'manual' });
+      expect(res.status).toBe(404);
+      expect(res.headers.get('location')).toBeNull();
+      expect(await res.text()).not.toContain('<title>Neurons</title>');
+    }
+  });
+
   it('rejects requests whose Host is not loopback (DNS rebinding)', async () => {
     const { server } = await start({ watch: false });
     const status = await new Promise<number>((resolve, reject) => {

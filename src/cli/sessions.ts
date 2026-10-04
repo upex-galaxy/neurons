@@ -12,6 +12,7 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { t, tn } from '../i18n.ts';
 
 export interface ProcInfo {
   pid: number;
@@ -221,6 +222,7 @@ export async function findClaudeSessions(
   try {
     if (platform === 'darwin') return await scanDarwin(repoRoot, selfPid, o.run ?? runCommand, o.realpath ?? fs.realpathSync);
     if (platform === 'linux') return scanLinux(repoRoot, selfPid, o.procDir);
+    // Windows and the rest: not detected (no lsof or /proc); `start` prints its generic hint.
   } catch {
     /* silent by design */
   }
@@ -231,26 +233,18 @@ export async function findClaudeSessions(
 export const LIVE_HOOKS_VERIFIED_VERSION = '2.1.288';
 
 /** Fallback for Claude Code versions that only read the hooks when a session starts. */
-function restartFallback(plural: boolean): string {
-  return plural
-    ? 'Si con una versión anterior no ves eventos, reinicialas: /exit y después claude --continue en cada una.'
-    : 'Si con una versión anterior no ves eventos, reiniciala: /exit y después claude --continue.';
+function restartFallback(count: number): string {
+  return tn('sessions.restart', count);
 }
 
-/** Spanish lines for `start` about the sessions found (empty when there are none). */
+/** Lines for `start` about the sessions found (empty when there are none). */
 export function sessionWarning(sessions: SessionProc[]): string[] {
   const n = sessions.length;
   if (n === 0) return [];
-  const head =
-    n === 1
-      ? 'Hay 1 sesión de Claude Code abierta en este repositorio (PID ' + sessions[0]?.pid + ').'
-      : `Hay ${n} sesiones de Claude Code abiertas en este repositorio (PID ${sessions.map((s) => s.pid).join(', ')}).`;
   return [
-    head,
-    n === 1
-      ? `Toma los hooks en vivo, sin reiniciar (verificado con Claude Code ${LIVE_HOOKS_VERIFIED_VERSION}).`
-      : `Toman los hooks en vivo, sin reiniciar (verificado con Claude Code ${LIVE_HOOKS_VERIFIED_VERSION}).`,
-    restartFallback(n > 1),
+    tn('sessions.found', n, { pids: sessions.map((s) => s.pid).join(', ') }),
+    tn('sessions.live', n, { version: LIVE_HOOKS_VERIFIED_VERSION }),
+    restartFallback(n),
   ];
 }
 
@@ -260,11 +254,8 @@ export function sessionWarning(sessions: SessionProc[]): string[] {
  */
 export function startHint(sessions: SessionProc[] | undefined): string[] {
   if (sessions === undefined) {
-    return [
-      `Abrí Claude Code en este repositorio. Una sesión que ya estaba abierta toma los hooks en vivo (verificado con Claude Code ${LIVE_HOOKS_VERIFIED_VERSION}).`,
-      restartFallback(false),
-    ];
+    return [t('sessions.unknown', { version: LIVE_HOOKS_VERIFIED_VERSION }), restartFallback(1)];
   }
-  if (sessions.length === 0) return ['Abrí Claude Code en este repositorio.'];
+  if (sessions.length === 0) return [t('sessions.none')];
   return sessionWarning(sessions);
 }

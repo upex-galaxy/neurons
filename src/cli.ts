@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Neurons CLI (bins `neu` and `neurons`): start | install | uninstall | replay | doctor |
 // ls | stop | open. `neu` alone is `neu start`, and `neu <dir>` is `neu start <dir>`.
-// All console output is Spanish; identifiers and comments stay in English.
+// Console output comes from src/i18n (English or Spanish, see detectLang); identifiers and
+// comments stay in English.
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -25,14 +26,17 @@ import {
   uninstallHooksSync,
   type DoctorCheck,
   type RestoreBashDiffResult,
+  type SettingsSourceInfo,
 } from './install/settings.ts';
 import { route, type Options } from './cli/args.ts';
 import { STOP_TIMEOUT_MS, stopViewer, type StopTarget } from './cli/control.ts';
 import { CliError, err, fail, out } from './cli/output.ts';
 import { listViewers, removeViewerEntry, viewerForRepo, viewerFromLock, writeViewerEntry, type ViewerEntry } from './cli/registry.ts';
+import { browserCommand, shellArg, shutdownSignals } from './cli/platform.ts';
 import { resolveRepoRoot } from './cli/repo-root.ts';
 import { findClaudeSessions, startHint } from './cli/sessions.ts';
 import { DEFAULT_PORT, LEGACY_STATE_DIR_NAME, STATE_DIR_NAME } from './shared/types.ts';
+import { detectLang, setLang, t, tn, type Params } from './i18n.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,47 +50,9 @@ function version(): string {
   }
 }
 
-const HELP = `Neurons ${version()}
-Vista 3D en vivo de lo que Claude Code lee, edita, crea y borra en un repositorio.
-
-Uso:
-  neu [repo] [opciones]           Lo mismo que "neu start [repo]"
-  neu start [repo] [opciones]     Levanta el visor e instala los hooks mientras corre
-  neu ls                          Lista los visores que están corriendo
-  neu open [repo]                 Abre en el navegador el visor de un repo
-  neu stop [repo] [--force]       Cierra el visor de un repo (sus hooks se quitan al salir)
-  neu stop --all                  Cierra todos los visores
-  neu install [repo] [--port N]   Instala los hooks a mano
-  neu uninstall [repo]            Quita los hooks (y revierte bashEditDiffEnabled)
-  neu replay [repo|archivo.jsonl] Reproduce un registro grabado
-  neu doctor [repo]               Revisa el entorno
-  neu help                        Muestra esta ayuda
-
-Opciones:
-  --port N         Puerto (por defecto ${DEFAULT_PORT}; si está ocupado se usa el siguiente libre)
-  --strict-port    Falla si el puerto está ocupado en lugar de buscar otro
-  --no-open        No abre el navegador
-  --no-install     start: no instala los hooks
-  --no-bash-diff   start: no activa bashEditDiffEnabled en la configuración de usuario
-  --all            stop: cierra todos los visores
-  --force          stop: si el visor no cierra en ${STOP_TIMEOUT_MS / 1000} s, lo mata (SIGKILL) y quita sus hooks
-  -h, --help       Muestra esta ayuda
-  -v, --version    Muestra la versión
-
-[repo] es el directorio actual si no se indica. Dentro de un repositorio git se usa
-su raíz, aunque estés en una subcarpeta. "neu open" sin repo abre el visor del repo
-en el que estás; si ahí no corre ninguno, abre el único que haya o los lista.
-"neurons" funciona igual que "neu".
-
-Ejemplos:
-  neu                          Visor del repo en el que estás
-  neu ~/proyectos/api          Visor de otro repo (uno por repo, cada uno en su puerto)
-  neu --port 8080 --no-open    Puerto fijo y sin abrir el navegador
-  neu ls                       Qué visores están corriendo y en qué URL
-  neu open ~/proyectos/api     Vuelve a abrir el visor de ese repo
-  neu stop                     Cierra el visor del repo en el que estás
-  neu stop --all               Cierra todos
-  neu replay                   Reproduce .neurons/events.jsonl del repo actual`;
+function help(): string {
+  return t('cli.help', { version: version(), port: DEFAULT_PORT, stopSeconds: STOP_TIMEOUT_MS / 1000 });
+}
 
 // ---------------------------------------------------------------- repo
 
@@ -96,10 +62,8 @@ Ejemplos:
  */
 function resolveRepo(arg: string | undefined, o: { treeNote?: boolean } = {}): string {
   const r = resolveRepoRoot(arg);
-  if (r.root !== r.given) out(`Usando la raíz del repositorio: ${r.root}`);
-  if (!r.isGit && o.treeNote) {
-    out('No es un repositorio git: el árbol se arma recorriendo la carpeta (sin node_modules, dist ni build).');
-  }
+  if (r.root !== r.given) out(t('repo.usingRoot', { root: r.root }));
+  if (!r.isGit && o.treeNote) out(t('repo.notGit'));
   return r.root;
 }
 
@@ -113,32 +77,30 @@ function resolveWebDir(): string | undefined {
   return candidates.find((d) => fs.existsSync(path.join(d, 'index.html')));
 }
 
+/** dist/docs (the user guide and architecture pages), when built. */
+function resolveDocsDir(): string | undefined {
+  const candidates = [
+    path.resolve(HERE, 'docs'), // dist/cli.mjs -> dist/docs
+    path.resolve(HERE, '..', 'dist', 'docs'), // src/cli.ts via tsx -> dist/docs
+  ];
+  return candidates.find((d) => fs.existsSync(path.join(d, 'guide.html')) || fs.existsSync(path.join(d, 'architecture.html')));
+}
+
 /**
- * Opens `url` in the default browser (open / xdg-open / start, via execFile). Resolves
- * true when the opener exited cleanly; `start` does not wait for it, `open` does.
+ * Opens `url` in the default browser (see browserCommand). Resolves true when the opener
+ * exited cleanly; `start` does not wait for it, `open` does.
  */
 function openBrowser(url: string): Promise<boolean> {
-  let cmd: string;
-  let args: string[];
-  if (process.platform === 'darwin') {
-    cmd = 'open';
-    args = [url];
-  } else if (process.platform === 'win32') {
-    cmd = 'cmd';
-    args = ['/c', 'start', '""', url];
-  } else {
-    cmd = 'xdg-open';
-    args = [url];
-  }
+  const { cmd, args, verbatim } = browserCommand(url);
   return new Promise((resolve) => {
     try {
-      const child = execFile(cmd, args, { windowsHide: true, timeout: 10_000 }, (e) => {
-        if (e) err(`No se pudo abrir el navegador (${e.message}). Abrí ${url} a mano.`);
+      const child = execFile(cmd, args, { windowsHide: true, timeout: 10_000, windowsVerbatimArguments: verbatim }, (e) => {
+        if (e) err(t('browser.failed', { error: e.message, url }));
         resolve(!e);
       });
       child.unref();
     } catch (e) {
-      err(`No se pudo abrir el navegador (${(e as Error).message}). Abrí ${url} a mano.`);
+      err(t('browser.failed', { error: (e as Error).message, url }));
       resolve(false);
     }
   });
@@ -148,20 +110,20 @@ function onServerError(e: unknown): void {
   if (process.env.NEURONS_DEBUG || process.env.REPO_SYNAPSE_DEBUG) err(`[neurons] ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
 }
 
-/** Spanish lines about the bashEditDiffEnabled release, for the user. */
+/** Lines about the bashEditDiffEnabled release, for the user. */
 function bashDiffMessages(r: RestoreBashDiffResult | undefined): { info: string[]; warn: string[] } {
   if (!r) return { info: [], warn: [] };
   switch (r.status) {
     case 'restored':
-      return { info: ['bashEditDiffEnabled volvió a su valor anterior.'], warn: [] };
+      return { info: [t('bashDiff.restored')], warn: [] };
     case 'in-use':
-      return { info: ['bashEditDiffEnabled sigue activo: lo usa otro visor de Neurons abierto.'], warn: [] };
+      return { info: [t('bashDiff.inUse')], warn: [] };
     case 'pending':
       return {
         info: [],
         warn: [
-          `No se pudo revertir bashEditDiffEnabled en ${r.settingsPath ?? 'la configuración de usuario'} (${r.error ?? 'error desconocido'}).`,
-          'Se reintenta en el próximo "neu start" o "neu uninstall"; también podés quitar la clave a mano.',
+          t('bashDiff.pending', { path: r.settingsPath ?? t('bashDiff.userSettings'), error: r.error ?? t('common.unknownError') }),
+          t('bashDiff.retry'),
         ],
       };
     default:
@@ -193,39 +155,33 @@ function excludeStateDir(repo: string): void {
   try {
     ensureGitExcluded(repo);
   } catch (e) {
-    err(`Aviso: no se pudo actualizar .git/info/exclude (${(e as Error).message}). No agregues ${STATE_DIR_NAME}/ a git.`);
+    err(t('common.excludeFailed', { error: (e as Error).message, dir: STATE_DIR_NAME }));
   }
 }
 
 /** Fails when a repo-synapse version (before the rename) is running on the repo. */
-function failIfLegacyRunning(repo: string, action: string): void {
+function failIfLegacyRunning(repo: string, action: 'open' | 'install'): void {
   const legacy = readLegacyLock(repo);
   if (legacy?.alive && legacy.pid !== process.pid) {
-    fail(
-      `La versión anterior (repo-synapse) está corriendo sobre ${repo} (PID ${legacy.pid}). Cerrala antes de ${action}.\n` +
-        `Si ese proceso no es repo-synapse, borrá ${legacyLockPath(repo)} y volvé a intentar.`,
-    );
+    fail(t('legacy.running', { repo, pid: legacy.pid, action: t(`legacy.action.${action}`), lock: legacyLockPath(repo) }));
   }
 }
 
 /** Takes the repo's lock or fails (see acquireLockSync). */
 function acquireLock(repo: string): void {
   // Both would install hooks in the same settings file, and each removes the other's.
-  failIfLegacyRunning(repo, 'abrir Neurons');
+  failIfLegacyRunning(repo, 'open');
   const r = acquireLockSync(repo);
   if (r.ok) {
     if (r.tookOver !== undefined) {
-      out(`Se encontró un lock viejo (PID ${r.tookOver || '?'}, ya no es de Neurons): se toma el control.`);
+      out(t('lock.tookOver', { pid: r.tookOver || '?' }));
     }
     return;
   }
   if (r.reason === 'live') {
-    fail(
-      `Ya hay un visor de Neurons corriendo sobre ${repo} (PID ${r.pid}). Cerralo antes de abrir otro.\n` +
-        `Si ese proceso no es de Neurons, borrá ${lockPath(repo)} y volvé a intentar.`,
-    );
+    fail(t('lock.live', { repo, pid: r.pid, lock: lockPath(repo) }));
   }
-  fail(`No se pudo tomar el lock de ${repo}: otro visor de Neurons está arrancando sobre el mismo repo.`);
+  fail(t('lock.busy', { repo }));
 }
 
 function releaseLock(repo: string): void {
@@ -236,7 +192,7 @@ function releaseLock(repo: string): void {
 
 function waitForSignal(): Promise<NodeJS.Signals> {
   return new Promise((resolve) => {
-    for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.once(s, () => resolve(s));
+    for (const s of shutdownSignals()) process.once(s, () => resolve(s));
   });
 }
 
@@ -261,13 +217,13 @@ async function cmdStart(positionals: string[], o: Options): Promise<number> {
     if (installed) {
       try {
         const r = undoInstall(repo);
-        if (r.hooksChanged) out('Hooks quitados de .claude/settings.local.json.');
+        if (r.hooksChanged) out(t('start.hooksRemoved'));
         const msg = bashDiffMessages(r.bashDiff);
         for (const line of msg.info) out(line);
         for (const line of msg.warn) err(line);
       } catch (e) {
-        err(`No se pudieron quitar los hooks: ${(e as Error).message}`);
-        err('Ejecutá "neu uninstall" para limpiarlos.');
+        err(t('common.uninstallFailed', { error: (e as Error).message }));
+        err(t('common.runUninstall'));
       }
     }
     try {
@@ -295,19 +251,20 @@ async function cmdStart(positionals: string[], o: Options): Promise<number> {
     }
     process.exit(code);
   };
-  for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+  for (const s of shutdownSignals()) {
     // A second signal while closing skips the wait for the server (cleanup already ran).
     process.on(s, () => {
-      if (!exiting) out(`\nRecibí ${s}, cerrando...`);
+      if (!exiting) out(t('start.signal', { signal: s }));
       void shutdown(0);
     });
   }
+  const unexpected = (e: unknown): Params => ({ error: e instanceof Error ? (e.stack ?? e.message) : String(e) });
   process.on('uncaughtException', (e) => {
-    err(`Error inesperado: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+    err(t('common.unexpected', unexpected(e)));
     void shutdown(1);
   });
   process.on('unhandledRejection', (e) => {
-    err(`Error inesperado: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+    err(t('common.unexpected', unexpected(e)));
     void shutdown(1);
   });
 
@@ -321,21 +278,24 @@ async function cmdStart(positionals: string[], o: Options): Promise<number> {
       installed = false;
     }
     const webDir = resolveWebDir();
-    if (!webDir) err('Aviso: la interfaz web no está compilada (npm run build:web). El servidor igual recibe hooks.');
+    if (!webDir) err(t('start.webMissing'));
+    const docsDir = resolveDocsDir();
     server = await startNeuronsServer({
       root: repo,
       port: o.port,
       portStrict: o.strictPort,
       mode: 'live',
       ...(webDir ? { webDir } : {}),
+      ...(docsDir ? { docsDir } : {}),
       onError: onServerError,
     });
-    if (o.port !== 0 && server.port !== o.port) out(`El puerto ${o.port} está ocupado: se usa ${server.port}.`);
+    if (server.watcherError) err(t('start.watcherFailed', { error: server.watcherError }));
+    if (o.port !== 0 && server.port !== o.port) out(t('start.portBusy', { port: o.port, actual: server.port }));
     try {
       writeViewerEntry({ repo, port: server.port, url: server.url });
       registered = true;
     } catch (e) {
-      err(`Aviso: no se pudo registrar el visor (${(e as Error).message}): "neu ls", "neu open" y "neu stop" no lo van a ver.`);
+      err(t('start.registryFailed', { error: (e as Error).message }));
     }
 
     let bashNote = '';
@@ -348,43 +308,37 @@ async function cmdStart(positionals: string[], o: Options): Promise<number> {
         // may be on disk and the cleanup must undo it, even if the install threw.
         if (readManifest(repo)) installed = true;
       }
-      out(`Hooks instalados en ${path.relative(repo, inst.settingsPath)} (puerto ${server.port}).`);
-      if (inst.excludeError) {
-        err(`Aviso: no se pudo actualizar .git/info/exclude (${inst.excludeError}). No agregues .claude/settings.local.json ni ${STATE_DIR_NAME}/ a git.`);
-      }
+      out(t('common.hooksInstalled', { file: path.relative(repo, inst.settingsPath), port: server.port }));
+      if (inst.excludeError) err(t('start.excludeFailed', { error: inst.excludeError, dir: STATE_DIR_NAME }));
       if (o.bashDiff) {
         try {
           const r = enableBashEditDiffSync({ repoRoot: repo });
-          if (r.changed) {
-            bashNote = `bashEditDiffEnabled activado en ${r.settingsPath} mientras corre el visor.`;
-          } else if (r.reason === 'shared') {
-            bashNote = `bashEditDiffEnabled ya lo activó otro visor de Neurons: sigue activo mientras alguno esté abierto.`;
-          } else if (r.reason === 'missing') {
-            bashNote = `No existe ${r.settingsPath}: no se activa bashEditDiffEnabled.`;
-          } else if (r.reason === 'invalid') {
-            bashNote = `${r.settingsPath} no es JSON válido: no se activa bashEditDiffEnabled.`;
-          }
+          if (r.changed) bashNote = t('bashDiff.enabled', { path: r.settingsPath });
+          else if (r.reason === 'shared') bashNote = t('bashDiff.shared');
+          else if (r.reason === 'missing') bashNote = t('bashDiff.missing', { path: r.settingsPath });
+          else if (r.reason === 'invalid') bashNote = t('bashDiff.invalid', { path: r.settingsPath });
         } catch (e) {
-          bashNote = `No se pudo activar bashEditDiffEnabled (${(e as Error).message}): se sigue sin él (los borrados por Bash se atribuyen por el watcher).`;
+          bashNote = t('bashDiff.enableFailed', { error: (e as Error).message });
         }
       }
     }
     if (bashNote) out(bashNote);
 
     out('');
-    out(`Neurons escuchando en ${server.url}`);
-    out(`Repositorio: ${repo}`);
+    out(t('start.listening', { url: server.url }));
+    out(t('start.repository', { repo }));
+    if (docsDir) out(t('start.docs', { url: server.url }));
     out('');
     if (o.install) {
       for (const line of startHint(await findClaudeSessions(repo))) out(line);
     } else {
-      out('Los hooks no se instalaron (--no-install): Claude Code no va a enviar eventos.');
+      out(t('start.noInstall'));
     }
-    out(o.install ? 'Ctrl+C para salir: los hooks se quitan al cerrar.' : 'Ctrl+C para salir.');
+    out(o.install ? t('start.ctrlCHooks') : t('start.ctrlC'));
 
     if (o.open) void openBrowser(server.url);
   } catch (e) {
-    err(e instanceof CliError ? e.message : `No se pudo arrancar: ${(e as Error).message}`);
+    err(e instanceof CliError ? e.message : t('start.failed', { error: (e as Error).message }));
     return shutdown(1);
   }
 
@@ -399,17 +353,14 @@ function cmdInstall(positionals: string[], o: Options): number {
   // Without a manifest the live start runs with --no-install: there is nothing to protect.
   const lock = readLock(repo);
   if (lock?.alive && lock.pid !== process.pid && readManifest(repo)) {
-    fail(
-      `Neurons está corriendo sobre ${repo} (PID ${lock.pid}) y sus hooks ya están instalados: no se tocan.\n` +
-        'Cerralo antes de instalar los hooks a mano.',
-    );
+    fail(t('install.viewerRunning', { repo, pid: lock.pid }));
   }
   // Installing removes that version's hooks (and undoes its install) while it runs.
-  if (readLegacyManifest(repo)) failIfLegacyRunning(repo, 'instalar los hooks a mano');
+  if (readLegacyManifest(repo)) failIfLegacyRunning(repo, 'install');
   const r = installHooksSync({ repoRoot: repo, port: o.port });
-  out(`Hooks instalados en ${r.settingsPath} (puerto ${o.port}).`);
-  out(`Mientras no haya un servidor en el puerto ${o.port}, Claude Code va a mostrar "hook error" en cada herramienta.`);
-  out('Quitalos con "neu uninstall".');
+  out(t('common.hooksInstalled', { file: r.settingsPath, port: o.port }));
+  out(t('install.hookErrorWarning', { port: o.port }));
+  out(t('install.removeHint'));
   return 0;
 }
 
@@ -417,14 +368,14 @@ function cmdUninstall(positionals: string[]): number {
   const repo = resolveRepo(positionals[0]);
   const lock = readLock(repo);
   if (lock?.alive && lock.pid !== process.pid) {
-    out(`Aviso: Neurons sigue corriendo sobre este repo (PID ${lock.pid}).`);
+    out(t('uninstall.stillRunning', { pid: lock.pid }));
   }
   const legacy = readLegacyLock(repo);
   if (legacy?.alive && legacy.pid !== process.pid) {
-    out(`Aviso: la versión anterior (repo-synapse) sigue corriendo sobre este repo (PID ${legacy.pid}).`);
+    out(t('uninstall.legacyRunning', { pid: legacy.pid }));
   }
   const r = undoInstall(repo);
-  out(r.hooksChanged ? 'Hooks quitados.' : 'No había hooks de Neurons para quitar.');
+  out(r.hooksChanged ? t('common.hooksRemoved') : t('common.noHooks'));
   const msg = bashDiffMessages(r.bashDiff);
   for (const line of msg.info) out(line);
   for (const line of msg.warn) err(line);
@@ -434,7 +385,7 @@ function cmdUninstall(positionals: string[]): number {
 async function cmdReplay(positionals: string[], o: Options): Promise<number> {
   const target = path.resolve(positionals[0] ?? process.cwd());
   const st = fs.statSync(target, { throwIfNoEntry: false });
-  if (!st) fail(`No existe ${target}.`);
+  if (!st) fail(t('replay.missing', { path: target }));
   let root: string;
   let file: string;
   if (st.isDirectory()) {
@@ -449,10 +400,11 @@ async function cmdReplay(positionals: string[], o: Options): Promise<number> {
     const base = path.basename(dir);
     root = base === STATE_DIR_NAME || base === LEGACY_STATE_DIR_NAME ? path.dirname(dir) : dir;
   }
-  if (!fs.existsSync(file)) fail(`No hay registro para reproducir: ${file} no existe.`);
+  if (!fs.existsSync(file)) fail(t('replay.noLog', { file }));
 
   const webDir = resolveWebDir();
-  if (!webDir) err('Aviso: la interfaz web no está compilada (npm run build:web).');
+  if (!webDir) err(t('common.webMissing'));
+  const docsDir = resolveDocsDir();
   const server = await startNeuronsServer({
     root,
     port: o.port,
@@ -460,51 +412,60 @@ async function cmdReplay(positionals: string[], o: Options): Promise<number> {
     mode: 'replay',
     replayFile: file,
     ...(webDir ? { webDir } : {}),
+    ...(docsDir ? { docsDir } : {}),
     onError: onServerError,
   });
-  out(`Neurons (replay) escuchando en ${server.url}`);
-  out(`Registro: ${file}`);
-  out('Ctrl+C para salir.');
+  out(t('replay.listening', { url: server.url }));
+  out(t('replay.log', { file }));
+  if (docsDir) out(t('start.docs', { url: server.url }));
+  out(t('start.ctrlC'));
   if (o.open) void openBrowser(server.url);
   await waitForSignal();
   await withTimeout(server.close(), 2000);
   return 0;
 }
 
-const STATUS_LABEL: Record<DoctorCheck['status'], string> = {
-  ok: '[ok]    ',
-  info: '[info]  ',
-  warn: '[aviso] ',
-  error: '[error] ',
-};
+const STATUSES: DoctorCheck['status'][] = ['ok', 'info', 'warn', 'error'];
+
+/** `[label]` padded to the widest label of the current language. */
+function statusLabel(status: DoctorCheck['status']): string {
+  const width = Math.max(...STATUSES.map((s) => t(`doctor.status.${s}`).length)) + 3;
+  return `[${t(`doctor.status.${status}`)}]`.padEnd(width);
+}
+
+const SCOPES: SettingsSourceInfo['scope'][] = ['managed', 'user', 'project', 'local'];
+
+/** The settings scope, translated and padded to the widest scope of the current language. */
+function scopeLabel(scope: SettingsSourceInfo['scope']): string {
+  const width = Math.max(...SCOPES.map((s) => t(`doctor.scopeColumn.${s}`).length));
+  return t(`doctor.scopeColumn.${scope}`).padEnd(width);
+}
 
 function cmdDoctor(positionals: string[]): number {
   const repo = resolveRepo(positionals[0]);
   const report = checkEnvironmentSync(repo);
-  out(`Neurons ${version()}: diagnóstico de ${repo}`);
+  out(t('doctor.title', { version: version(), repo }));
   out('');
-  out('Archivos de configuración:');
+  out(t('doctor.configFiles'));
   for (const s of report.sources) {
-    const state = !s.exists ? 'no existe' : s.valid ? 'ok' : 'JSON inválido';
-    out(`  ${s.scope.padEnd(8)} ${s.path} (${state})`);
+    const state = !s.exists ? t('doctor.source.missing') : s.valid ? t('doctor.source.ok') : t('doctor.source.invalid');
+    out(`  ${scopeLabel(s.scope)}  ${s.path} (${state})`);
   }
   out('');
-  for (const c of report.checks) out(`${STATUS_LABEL[c.status]}${c.message}`);
+  const checks = [...report.checks];
   const webDir = resolveWebDir();
-  out(`${STATUS_LABEL[webDir ? 'ok' : 'warn']}${webDir ? `Interfaz web compilada en ${webDir}.` : 'La interfaz web no está compilada (npm run build:web).'}`);
+  checks.push(webDir ? { id: 'web', status: 'ok', message: t('doctor.web.ok', { dir: webDir }) } : { id: 'web', status: 'warn', message: t('doctor.web.missing') });
+  const docsDir = resolveDocsDir();
+  checks.push(docsDir ? { id: 'docs', status: 'ok', message: t('doctor.docs.ok', { dir: docsDir }) } : { id: 'docs', status: 'info', message: t('doctor.docs.missing') });
+  for (const c of checks) out(`${statusLabel(c.status)}${c.message}`);
   const errors = report.checks.filter((c) => c.status === 'error').length;
   const warns = report.checks.filter((c) => c.status === 'warn').length;
   out('');
-  out(errors + warns === 0 ? 'Todo en orden.' : `${errors} error(es) y ${warns} aviso(s).`);
+  out(errors + warns === 0 ? t('doctor.allGood') : t('doctor.summary', { errors: tn('doctor.errors', errors), warns: tn('doctor.warns', warns) }));
   return 0;
 }
 
 // ---------------------------------------------------------------- ls / open / stop
-
-/** `p` ready to paste in a shell: single-quoted when it has anything but plain path characters. */
-function shellArg(p: string): string {
-  return /^[\w@%+=:,./~-]+$/.test(p) ? p : `'${p.replaceAll("'", `'\\''`)}'`;
-}
 
 /** `p` with the home directory shown as ~. */
 function homeShort(p: string): string {
@@ -523,7 +484,7 @@ function formatSince(iso: string): string {
 
 function viewersTable(viewers: ViewerEntry[]): string[] {
   const rows = [
-    ['Repositorio', 'Puerto', 'URL', 'PID', 'Desde'],
+    [t('ls.header.repo'), t('ls.header.port'), t('ls.header.url'), t('ls.header.pid'), t('ls.header.since')],
     ...viewers.map((v) => [homeShort(v.repo), String(v.port), v.url, String(v.pid), formatSince(v.startedAt)]),
   ];
   const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
@@ -531,10 +492,10 @@ function viewersTable(viewers: ViewerEntry[]): string[] {
 }
 
 function cmdLs(positionals: string[]): number {
-  if (positionals.length > 0) fail('"neu ls" no lleva argumentos: lista todos los visores.');
+  if (positionals.length > 0) fail(t('ls.noArgs'));
   const viewers = listViewers();
   if (viewers.length === 0) {
-    out('No hay visores corriendo.');
+    out(t('common.noViewers'));
     return 0;
   }
   for (const line of viewersTable(viewers)) out(line);
@@ -555,7 +516,7 @@ async function cmdOpen(positionals: string[]): Promise<number> {
   if (positionals[0] !== undefined) {
     const repo = resolveRepo(positionals[0]);
     target = viewerForRepo(repo);
-    if (!target) fail(`No hay un visor de Neurons corriendo sobre ${repo}.\nArrancalo con: neu start ${shellArg(repo)}`);
+    if (!target) fail(t('open.noViewer', { repo, arg: shellArg(repo) }));
   }
   const viewers = target ? [] : listViewers();
   if (!target) {
@@ -564,32 +525,59 @@ async function cmdOpen(positionals: string[]): Promise<number> {
     target = here === undefined ? undefined : viewerForRepo(here, viewers);
   }
   if (!target) {
-    if (viewers.length === 0) fail('No hay visores corriendo. Arrancá uno con "neu" dentro del repositorio.');
+    if (viewers.length === 0) fail(t('open.noneRunning'));
     if (viewers.length > 1) {
-      out('Hay varios visores corriendo:');
+      out(t('open.several'));
       out('');
       for (const line of viewersTable(viewers)) out(`  ${line}`);
       out('');
-      out('Indicá cuál querés abrir: neu open <repo>');
+      out(t('open.pick'));
       return 1;
     }
     target = viewers[0]!;
   }
-  out(`Abriendo ${target.url} (${homeShort(target.repo)}).`);
+  out(t('open.opening', { url: target.url, repo: homeShort(target.repo) }));
   return (await openBrowser(target.url)) ? 0 : 1;
 }
 
+/**
+ * The cleanup a viewer that died without running its own does at exit: registry entry,
+ * lock, hooks and bashEditDiffEnabled. After SIGKILL, and on Windows after any stop.
+ */
+function cleanupAfterKill(target: StopTarget & { repo: string }, info: string[], warn: string[]): boolean {
+  try {
+    removeViewerEntry(target.pid);
+    const lock = readLock(target.repo);
+    if (lock && lock.pid === target.pid && !lock.alive) fs.rmSync(lockPath(target.repo), { force: true });
+    const u = undoInstall(target.repo);
+    info.push(u.hooksChanged ? t('common.hooksRemoved') : t('common.noHooks'));
+    const msg = bashDiffMessages(u.bashDiff);
+    info.push(...msg.info);
+    warn.push(...msg.warn);
+    return msg.warn.length === 0;
+  } catch (e) {
+    warn.push(t('common.uninstallFailed', { error: (e as Error).message }), t('common.runUninstallRepo', { repo: shellArg(target.repo) }));
+    return false;
+  }
+}
+
 /** Stops one viewer and returns what to print. `ok` false makes `stop` exit 1. */
-async function stopOne(t: StopTarget & { repo: string }, force: boolean): Promise<{ ok: boolean; info: string[]; warn: string[] }> {
-  const where = `${homeShort(t.repo)} (PID ${t.pid})`;
-  const r = await stopViewer(t, { force });
+async function stopOne(target: StopTarget & { repo: string }, force: boolean): Promise<{ ok: boolean; info: string[]; warn: string[] }> {
+  const where = `${homeShort(target.repo)} (PID ${target.pid})`;
+  const r = await stopViewer(target, { force });
   switch (r.status) {
     case 'stopped': {
+      if (process.platform === 'win32') {
+        // process.kill() is TerminateProcess on Windows: the viewer ran no cleanup.
+        const info = [t('stop.terminatedWin', { where })];
+        const warn: string[] = [];
+        return { ok: cleanupAfterKill(target, info, warn), info, warn };
+      }
       // The viewer removes its hooks before exiting; leftovers mean its cleanup failed.
-      const info = [`Visor de ${where} cerrado.`];
-      const lock = readLock(t.repo);
-      if (readManifest(t.repo) && !lock?.alive) {
-        return { ok: false, info, warn: [`Quedaron hooks de Neurons en ${t.repo}: quitalos con "neu uninstall ${shellArg(t.repo)}".`] };
+      const info = [t('stop.closed', { where })];
+      const lock = readLock(target.repo);
+      if (readManifest(target.repo) && !lock?.alive) {
+        return { ok: false, info, warn: [t('stop.leftHooks', { repo: target.repo, arg: shellArg(target.repo) })] };
       }
       return { ok: true, info, warn: [] };
     }
@@ -597,57 +585,39 @@ async function stopOne(t: StopTarget & { repo: string }, force: boolean): Promis
       return {
         ok: false,
         info: [],
-        warn: [
-          `El visor de ${where} no se cerró en ${STOP_TIMEOUT_MS / 1000} s.`,
-          `Revisá con "neu ls" en un rato, o forzalo con "neu stop --force ${shellArg(t.repo)}" (después quita sus hooks).`,
-        ],
+        warn: [t('stop.timeout', { where, seconds: STOP_TIMEOUT_MS / 1000 }), t('stop.timeoutHint', { arg: shellArg(target.repo) })],
       };
     case 'killed': {
-      const info = [`Visor de ${where} terminado con SIGKILL.`];
+      const info = [t('stop.killed', { where })];
       const warn: string[] = [];
-      let ok = true;
-      try {
-        removeViewerEntry(t.pid);
-        const lock = readLock(t.repo);
-        if (lock && lock.pid === t.pid && !lock.alive) fs.rmSync(lockPath(t.repo), { force: true });
-        const u = undoInstall(t.repo);
-        info.push(u.hooksChanged ? 'Hooks quitados.' : 'No había hooks de Neurons para quitar.');
-        const msg = bashDiffMessages(u.bashDiff);
-        info.push(...msg.info);
-        warn.push(...msg.warn);
-        if (msg.warn.length > 0) ok = false;
-      } catch (e) {
-        warn.push(`No se pudieron quitar los hooks: ${(e as Error).message}`, `Ejecutá "neu uninstall ${shellArg(t.repo)}" para limpiarlos.`);
-        ok = false;
-      }
-      return { ok, info, warn };
+      return { ok: cleanupAfterKill(target, info, warn), info, warn };
     }
     case 'not-viewer':
-      return { ok: false, info: [], warn: [`El PID ${t.pid} anotado para ${homeShort(t.repo)} no es un visor de Neurons: no se le envió ninguna señal.`] };
+      return { ok: false, info: [], warn: [t('stop.notViewer', { pid: target.pid, repo: homeShort(target.repo) })] };
     case 'error':
-      return { ok: false, info: [], warn: [`No se pudo cerrar el visor de ${where}: ${r.message}`] };
+      return { ok: false, info: [], warn: [t('stop.error', { where, error: r.message })] };
   }
 }
 
 async function cmdStop(positionals: string[], o: Options): Promise<number> {
   let targets: Array<StopTarget & { repo: string }>;
   if (o.all) {
-    if (positionals.length > 0) fail('"neu stop --all" no lleva repo: cierra todos los visores.');
+    if (positionals.length > 0) fail(t('stop.allNoArgs'));
     targets = listViewers().map((v) => ({ pid: v.pid, cmd: v.cmd, startedAt: v.startedAt, repo: v.repo, ...(v.command ? { command: v.command } : {}) }));
     if (targets.length === 0) {
-      out('No hay visores corriendo.');
+      out(t('common.noViewers'));
       return 0;
     }
   } else {
     const repo = resolveRepo(positionals[0]);
     const v = viewerForRepo(repo) ?? viewerFromLock(repo);
     if (!v) {
-      out(`No hay un visor de Neurons corriendo sobre ${repo}.`);
+      out(t('common.noViewer', { repo }));
       return 1;
     }
     targets = [{ pid: v.pid, cmd: v.cmd, startedAt: v.startedAt, repo, ...(v.command ? { command: v.command } : {}) }];
   }
-  if (targets.length > 1) out(`Cerrando ${targets.length} visores...`);
+  if (targets.length > 1) out(t('stop.closing', { count: targets.length }));
   // In parallel: each one may take up to STOP_TIMEOUT_MS.
   const results = await Promise.all(targets.map((t) => stopOne(t, o.force)));
   for (const r of results) {
@@ -676,13 +646,15 @@ function isFileArg(p: string): boolean {
 }
 
 async function main(argv: string[]): Promise<number> {
+  // Before routing, so its own errors come out in the chosen language too.
+  setLang(detectLang(argv));
   const r = route(argv, isDirectoryArg, isFileArg);
   if (r.kind === 'version') {
     out(version());
     return 0;
   }
   if (r.kind === 'help') {
-    out(HELP);
+    out(help());
     return 0;
   }
   switch (r.command) {
@@ -710,7 +682,7 @@ main(process.argv.slice(2)).then(
     process.exitCode = code;
   },
   (e: unknown) => {
-    err(e instanceof CliError ? e.message : `Error: ${e instanceof Error ? e.message : String(e)}`);
+    err(e instanceof CliError ? e.message : t('common.error', { error: e instanceof Error ? e.message : String(e) }));
     process.exitCode = 1;
   },
 );

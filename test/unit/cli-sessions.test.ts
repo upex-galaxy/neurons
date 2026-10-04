@@ -15,6 +15,10 @@ import {
   startHint,
   type CommandRunner,
 } from '../../src/cli/sessions.ts';
+import { setLang } from '../../src/i18n.ts';
+
+// The messages asserted below are the Spanish ones.
+setLang('es');
 
 const tmpDirs: string[] = [];
 function tmp(prefix: string): string {

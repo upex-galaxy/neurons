@@ -88,6 +88,8 @@ function run(args: string[], cfgDir: string, o: { cwd?: string; env?: NodeJS.Pro
     NEURONS_HOME: neuronsHome,
     GIT_CONFIG_GLOBAL: '/dev/null',
     XDG_CONFIG_HOME: xdgDir,
+    // The messages asserted in this file are the Spanish ones.
+    NEURONS_LANG: 'es',
     ...o.env,
   };
   for (const k of ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy']) delete env[k];
@@ -175,7 +177,12 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     expect(fs.readFileSync(CLI, 'utf8').startsWith('#!/usr/bin/env node\n')).toBe(true);
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as { version: string };
     expect(execFileSync(process.execPath, [CLI, '--version'], { encoding: 'utf8' }).trim()).toBe(pkg.version);
-    expect(execFileSync(process.execPath, [CLI, '--help'], { encoding: 'utf8' })).toContain('Uso:');
+    const es = { ...process.env, NEURONS_LANG: 'es' };
+    expect(execFileSync(process.execPath, [CLI, '--help'], { encoding: 'utf8', env: es })).toContain('Uso:');
+    expect(execFileSync(process.execPath, [CLI, '--help', '--lang', 'en'], { encoding: 'utf8', env: es })).toContain('Usage:');
+    const en = { ...process.env, NEURONS_LANG: '', LC_ALL: '', LC_MESSAGES: '', LANG: 'en_US.UTF-8' };
+    expect(execFileSync(process.execPath, [CLI, 'help'], { encoding: 'utf8', env: en })).toContain('Usage:');
+    expect(execFileSync(process.execPath, [CLI, 'help'], { encoding: 'utf8', env: { ...en, LANG: 'es_AR.UTF-8' } })).toContain('Uso:');
   });
 
   it('start installs hooks with the real port, answers 204 and cleans up on SIGINT', async () => {
@@ -347,7 +354,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     // Stale lock + leftovers of a crashed run.
     fs.writeFileSync(path.join(repo, '.neurons', 'lock'), JSON.stringify({ pid: 2 ** 22 + 4321 }));
     execFileSync(process.execPath, [CLI, 'install', repo, '--port', '7'], {
-      env: { ...process.env, CLAUDE_CONFIG_DIR: cfg, GIT_CONFIG_GLOBAL: '/dev/null', XDG_CONFIG_HOME: xdgDir },
+      env: { ...process.env, NEURONS_LANG: 'es', CLAUDE_CONFIG_DIR: cfg, GIT_CONFIG_GLOBAL: '/dev/null', XDG_CONFIG_HOME: xdgDir },
     });
     const third = run(['start', repo, '--no-open', '--port', '0', '--no-bash-diff'], cfg);
     const m = await third.waitFor(READY);
@@ -475,7 +482,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
   it('install and uninstall work as manual commands', () => {
     const repo = gitRepo();
     const cfg = tmp('rs-cli-cfg-');
-    const env = { ...process.env, CLAUDE_CONFIG_DIR: cfg, GIT_CONFIG_GLOBAL: '/dev/null', XDG_CONFIG_HOME: xdgDir };
+    const env = { ...process.env, NEURONS_LANG: 'es', CLAUDE_CONFIG_DIR: cfg, GIT_CONFIG_GLOBAL: '/dev/null', XDG_CONFIG_HOME: xdgDir };
     execFileSync(process.execPath, [CLI, 'install', repo, '--port', '7801'], { env });
     expect(ownUrls(path.join(repo, '.claude', 'settings.local.json')).every((o) => o.url === hookUrl(7801))).toBe(true);
     const out = execFileSync(process.execPath, [CLI, 'uninstall', repo], { env, encoding: 'utf8' });
@@ -568,6 +575,9 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     expect(code).toBe(0);
     expect(r.output()).toContain('diagnóstico');
     expect(r.output()).toContain('Node');
+    // The settings scope column is translated and aligned to the widest label.
+    expect(r.output()).toMatch(/^ {2}usuario {7}\S/m);
+    expect(r.output()).not.toMatch(/^ {2}user /m);
   });
 
   it('fails with a Spanish message for a missing repo', async () => {
@@ -687,6 +697,24 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     expect(file.out).not.toContain('no existe');
     const log = await finished(run(['events.jsonl'], cfg, { cwd }));
     expect(log.out).toContain('neu replay events.jsonl');
+  });
+
+  it('messages follow --lang, then NEURONS_LANG', async () => {
+    const cfg = tmp('rs-cli-cfg-');
+    const repo = gitRepo();
+    const doctorEn = await finished(run(['doctor', repo, '--lang', 'en'], cfg));
+    expect(doctorEn.code).toBe(0);
+    expect(doctorEn.out).toContain(`Neurons `);
+    expect(doctorEn.out).toContain(`: checking ${repo}`);
+    expect(doctorEn.out).toContain('Settings files:');
+    expect(doctorEn.out).toMatch(/^ {2}user {5}\S/m);
+    expect(doctorEn.out).not.toContain('diagnóstico');
+    const unknownEn = await finished(run(['sotp'], cfg, { cwd: tmp('rs-cli-cwd-'), env: { NEURONS_LANG: 'en' } }));
+    expect(unknownEn.out).toContain('Unknown command: "sotp".');
+    expect(unknownEn.out).toContain('Did you mean "neu stop"?');
+    const badLang = await finished(run(['ls', '--lang', 'fr'], cfg));
+    expect(badLang.code).toBe(1);
+    expect(badLang.out).toContain('Idioma inválido: "fr"');
   });
 
   it('open picks the viewer, lists several, and stop --all closes every one', async () => {

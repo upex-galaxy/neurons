@@ -563,6 +563,49 @@ export function classifyBash(command: string): BashClassification {
   return out;
 }
 
+// ---------------------------------------------------------------- programs
+
+/** Shell words that open or close a compound command: never the program name. */
+const SHELL_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', '!', '{', '}', '[[', ']]', 'esac', 'in']);
+/** Segments that are not a command run (loop headers, case labels). */
+const NON_COMMAND = new Set(['for', 'select', 'case', 'function']);
+/** Builtins that only change the shell's state: not worth naming as a program. */
+const STATE_BUILTINS = new Set(['[', 'test', 'cd', 'pushd', 'popd', 'export', 'unset', 'set', 'shopt', 'true', 'false', ':', 'local', 'declare', 'readonly']);
+export const PROGRAMS_MAX = 8;
+
+/**
+ * Distinct program names a Bash command runs, in order of first appearance: the first word
+ * of each simple command after env assignments and wrappers (sudo, time, xargs...), as a
+ * basename. Heredoc bodies are skipped by the tokenizer; dynamic names ($CMD) are dropped.
+ */
+export function bashPrograms(command: string, max = PROGRAMS_MAX): string[] {
+  if (typeof command !== 'string' || command.trim() === '') return [];
+  let segments: string[][];
+  try {
+    segments = splitSegments(tokenize(command));
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const seg of segments) {
+    let words = seg;
+    while (words.length > 0 && SHELL_KEYWORDS.has(words[0] as string)) words = words.slice(1);
+    if (words.length === 0 || NON_COMMAND.has(words[0] as string)) continue;
+    const argv = unwrap(words);
+    const first = argv[0];
+    if (first === undefined || first === '' || isDynamicWord(first) || first.endsWith('()')) continue;
+    const name = commandName(first.replace(/\\/g, '/')).replace(/\.exe$/i, '');
+    if (name === '' || SHELL_KEYWORDS.has(name) || STATE_BUILTINS.has(name) || out.includes(name)) continue;
+    out.push(name);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function isDynamicWord(w: string): boolean {
+  return w.includes('$') || w.includes('`') || w.includes('=');
+}
+
 // ---------------------------------------------------------------- output parsing
 
 const GREP_LINE = /^(.+?):(\d+)(?::|-|$)/;

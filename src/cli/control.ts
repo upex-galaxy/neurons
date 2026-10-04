@@ -2,6 +2,11 @@
 // normally only signals and waits. Every signal is preceded by isNeuronsViewer(): a PID
 // is signaled only while it is still the viewer that wrote the record (command line and
 // start time).
+//
+// Windows: process.kill(pid, 'SIGTERM') is TerminateProcess there. The viewer gets no
+// signal and runs none of its exit cleanup, so after a stop on win32 the caller (cmdStop)
+// does that cleanup itself, as after --force: hooks, bashEditDiffEnabled, lock, registry.
+// If that fails too, `neu uninstall <repo>` is the way to remove the hooks.
 
 import { isPidAlive } from '../install/settings.ts';
 import { isNeuronsViewer, type ViewerIdentity } from './registry.ts';

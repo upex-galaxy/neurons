@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createPathResolver, toPosix } from '../../src/server/paths.ts';
+import { createPathResolver, fromMsysPath, toPosix } from '../../src/server/paths.ts';
 
 const tmpDirs: string[] = [];
 
@@ -92,5 +92,35 @@ describe('createPathResolver', () => {
     // Both spellings of the same file are inside.
     expect(r.resolve(path.join(dir, 'x.ts')).rel).toBe('x.ts');
     expect(r.resolve(path.join(r.root, 'x.ts')).rel).toBe('x.ts');
+  });
+});
+
+describe('createPathResolver on Windows rules', () => {
+  const root = 'C:\\Users\\Me\\repo';
+  const r = createPathResolver(root, { platform: 'win32', realpath: (p) => p });
+
+  it('matches case-insensitively (drive letter included) and keeps "/" separators in rel', () => {
+    expect(r.resolve('C:\\Users\\Me\\repo\\src\\a.ts')).toEqual({ abs: 'C:\\Users\\Me\\repo\\src\\a.ts', rel: 'src/a.ts', inside: true });
+    expect(r.resolve('c:\\users\\me\\REPO\\src\\a.ts')).toMatchObject({ rel: 'src/a.ts', inside: true, abs: 'C:\\Users\\Me\\repo\\src\\a.ts' });
+    expect(r.resolve('C:/Users/Me/repo/web/main.ts')).toMatchObject({ rel: 'web/main.ts', inside: true });
+    expect(r.resolve('c:\\users\\me\\repo')).toMatchObject({ rel: '', inside: true });
+    expect(r.resolve('C:\\Users\\Me\\repo2\\x.ts')).toMatchObject({ inside: false });
+    expect(r.resolve('D:\\Users\\Me\\repo\\x.ts')).toMatchObject({ inside: false });
+  });
+
+  it('resolves relative paths against a cwd and accepts Git Bash drive paths', () => {
+    expect(r.resolve('src\\a.ts', 'c:\\Users\\Me\\repo')).toMatchObject({ rel: 'src/a.ts', inside: true });
+    expect(r.resolve('/c/Users/Me/repo/src/a.ts')).toMatchObject({ rel: 'src/a.ts', inside: true });
+    expect(r.resolve('/cygdrive/c/Users/Me/repo/src')).toMatchObject({ rel: 'src', inside: true });
+    expect(r.resolve('a.ts', '/c/Users/Me/repo/src')).toMatchObject({ rel: 'src/a.ts', inside: true });
+    expect(fromMsysPath('/c')).toBe('C:\\');
+    expect(fromMsysPath('/tmp/x')).toBe('/tmp/x');
+    expect(fromMsysPath('/usr/bin')).toBe('/usr/bin');
+  });
+
+  it('POSIX rules stay case-sensitive', () => {
+    const p = createPathResolver('/home/me/repo', { platform: 'linux', realpath: (x) => x });
+    expect(p.resolve('/home/me/repo/src/a.ts')).toMatchObject({ rel: 'src/a.ts', inside: true });
+    expect(p.resolve('/home/me/Repo/src/a.ts')).toMatchObject({ inside: false });
   });
 });

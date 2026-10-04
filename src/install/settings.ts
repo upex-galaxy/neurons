@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_PORT, HOOK_QUERY_MARKER, LEGACY_STATE_DIR_NAME, STATE_DIR_NAME } from '../shared/types.ts';
+import { t, tn } from '../i18n.ts';
 
 // ---------------------------------------------------------------- constants
 
@@ -84,7 +85,7 @@ export interface InstallManifest {
 export interface DoctorCheck {
   id: string;
   status: 'ok' | 'info' | 'warn' | 'error';
-  /** Spanish, one line. */
+  /** One line, in the CLI language (src/i18n). */
   message: string;
 }
 
@@ -170,7 +171,7 @@ function stripBom(s: string): string {
   return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
 }
 
-/** Parses a settings file. Blank file = {}. Throws a Spanish error on invalid JSON or a non-object. */
+/** Parses a settings file. Blank file = {}. Throws a translated error on invalid JSON or a non-object. */
 function parseSettings(raw: string, file: string): JsonObject {
   const text = stripBom(raw);
   if (text.trim() === '') return {};
@@ -178,9 +179,9 @@ function parseSettings(raw: string, file: string): JsonObject {
   try {
     v = JSON.parse(text);
   } catch (err) {
-    throw new Error(`${file} no es JSON válido (${(err as Error).message}). No se modificó.`);
+    throw new Error(t('settings.invalidJson', { file, error: (err as Error).message }));
   }
-  if (!isPlainObject(v)) throw new Error(`${file} no contiene un objeto JSON. No se modificó.`);
+  if (!isPlainObject(v)) throw new Error(t('settings.notObject', { file }));
   return v;
 }
 
@@ -215,10 +216,29 @@ export function writeFileAtomic(file: string, data: string | Buffer, newMode?: n
   const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
   try {
     fs.writeFileSync(tmp, data, mode === undefined ? {} : { mode });
-    fs.renameSync(tmp, target);
+    renameWithRetry(tmp, target);
   } catch (err) {
     fs.rmSync(tmp, { force: true });
     throw err;
+  }
+}
+
+/**
+ * fs.renameSync, retried for a moment on Windows: replacing a file another process has
+ * open (Claude Code reading settings.local.json, an antivirus scan) fails there with
+ * EPERM, EACCES or EBUSY until that handle closes.
+ */
+function renameWithRetry(from: string, to: string, platform: NodeJS.Platform = process.platform): void {
+  const deadline = Date.now() + (platform === 'win32' ? 2000 : 0);
+  for (let wait = 10; ; wait = Math.min(wait * 2, 200)) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (!(code === 'EPERM' || code === 'EACCES' || code === 'EBUSY') || Date.now() + wait > deadline) throw err;
+      sleepSync(wait);
+    }
   }
 }
 
@@ -227,7 +247,7 @@ export function writeFileAtomic(file: string, data: string | Buffer, newMode?: n
 function hooksObjectOf(settings: JsonObject): JsonObject | undefined {
   const hooks = settings.hooks;
   if (hooks === undefined) return undefined;
-  if (!isPlainObject(hooks)) throw new Error('La clave "hooks" de la configuración no es un objeto. No se modificó.');
+  if (!isPlainObject(hooks)) throw new Error(t('settings.hooksNotObject'));
   return hooks;
 }
 
@@ -297,7 +317,7 @@ export function mergeHooks(settings: object, port: number): object {
   for (const event of HOOK_EVENTS) {
     const cur = hooks[event];
     if (cur !== undefined && !Array.isArray(cur)) {
-      throw new Error(`hooks.${event} no es una lista. No se modificó.`);
+      throw new Error(t('settings.eventNotList', { event }));
     }
     const group = { hooks: [{ type: 'http', url: hookUrl(port), timeout: HOOK_TIMEOUT_S }] };
     hooks[event] = [...(cur ?? []), group];
@@ -821,7 +841,7 @@ export interface RestoreBashDiffResult {
    */
   status: 'none' | 'in-use' | 'restored' | 'untouched' | 'pending';
   settingsPath?: string;
-  /** Spanish reason when status is 'pending'. */
+  /** Translated reason when status is 'pending'. */
   error?: string;
 }
 
@@ -856,7 +876,7 @@ export function restoreBashEditDiffSync(o: { repoRoot: string }): RestoreBashDif
   try {
     cur = parseSettings(raw.toString('utf8'), file);
   } catch {
-    return keep(`${file} no es JSON válido`);
+    return keep(t('settings.restoreInvalid', { file }));
   }
   if (cur.bashEditDiffEnabled !== true) {
     clearBashDiffState(dir);
@@ -902,12 +922,61 @@ export function isPidAlive(pid: number): boolean {
 /** Slack for the 1 s resolution of `ps -o etime` and for clock jitter. */
 export const LOCK_START_SLACK_MS = 5000;
 
+/** What Windows reports about a process: start time (epoch ms) and command line. */
+interface Win32ProcessInfo {
+  startMs?: number;
+  command?: string;
+}
+
+const win32InfoCache = new Map<number, { at: number; info: Win32ProcessInfo | undefined }>();
+
 /**
- * When `pid` started (epoch ms), from `ps -o etime=` ([[dd-]hh:]mm:ss, locale independent).
- * undefined when it cannot be known (Windows, no ps, process gone).
+ * Windows has no `ps`: the start time and command line come from WMI (Win32_Process)
+ * through PowerShell, one call for both, remembered for a second (isNeuronsViewer asks for
+ * both in a row). undefined when PowerShell is missing or the process is gone.
+ */
+export function win32ProcessInfo(pid: number): Win32ProcessInfo | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  const cached = win32InfoCache.get(pid);
+  if (cached && Date.now() - cached.at < 1000) return cached.info;
+  let info: Win32ProcessInfo | undefined;
+  try {
+    const script =
+      `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; ` +
+      `if ($p) { [Console]::Out.WriteLine($p.CreationDate.ToUniversalTime().ToString('o')); [Console]::Out.WriteLine($p.CommandLine) }`;
+    const text = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+      windowsHide: true,
+    });
+    info = parseWin32ProcessInfo(text);
+  } catch {
+    info = undefined;
+  }
+  win32InfoCache.set(pid, { at: Date.now(), info });
+  return info;
+}
+
+/** Parses win32ProcessInfo's output: an ISO start time line, then the command line. */
+export function parseWin32ProcessInfo(text: string): Win32ProcessInfo | undefined {
+  const [first = '', ...rest] = text.replace(/\r/g, '').split('\n');
+  const startMs = Date.parse(first.trim());
+  const command = rest.join('\n').trim();
+  if (!Number.isFinite(startMs) && command === '') return undefined;
+  const info: Win32ProcessInfo = {};
+  if (Number.isFinite(startMs)) info.startMs = startMs;
+  if (command !== '') info.command = command;
+  return info;
+}
+
+/**
+ * When `pid` started (epoch ms), from `ps -o etime=` ([[dd-]hh:]mm:ss, locale independent),
+ * or from WMI on Windows. undefined when it cannot be known (no ps, process gone).
  */
 export function processStartMs(pid: number): number | undefined {
-  if (process.platform === 'win32' || !Number.isInteger(pid) || pid <= 0) return undefined;
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  if (process.platform === 'win32') return win32ProcessInfo(pid)?.startMs;
   const now = Date.now();
   let text: string;
   try {
@@ -925,9 +994,9 @@ export function processStartMs(pid: number): number | undefined {
   return now - (((days * 24 + hours) * 60 + mins) * 60 + secs) * 1000;
 }
 
-/** Command line of `pid` (`ps -o command=`), undefined when it cannot be read. */
+/** Command line of `pid` (`ps -o command=`, WMI on Windows), undefined when it cannot be read. */
 export function processCommand(pid: number): string | undefined {
-  if (process.platform === 'win32') return undefined;
+  if (process.platform === 'win32') return win32ProcessInfo(pid)?.command;
   try {
     const text = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], {
       encoding: 'utf8',
@@ -1028,13 +1097,16 @@ export function commandRunsScript(command: string, cmd: string): boolean {
   return BIN_NAMES.some((name) => hasArgument(command, path.join(dir, name)));
 }
 
-/** `arg` appears in the command line `command` as a whole, space-delimited argument. */
+/**
+ * `arg` appears in the command line `command` as a whole argument: whitespace or the
+ * line's ends around it, or double quotes (Windows command lines quote paths with spaces).
+ */
 function hasArgument(command: string, arg: string): boolean {
   if (arg === '') return false;
   for (let i = command.indexOf(arg); i !== -1; i = command.indexOf(arg, i + 1)) {
     const before = i === 0 ? ' ' : command.charAt(i - 1);
     const after = i + arg.length >= command.length ? ' ' : command.charAt(i + arg.length);
-    if (/\s/.test(before) && /\s/.test(after)) return true;
+    if ((/\s/.test(before) && /\s/.test(after)) || (before === '"' && after === '"')) return true;
   }
   return false;
 }
@@ -1206,9 +1278,7 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
   checks.push({
     id: 'node',
     status: nodeOk ? 'ok' : 'error',
-    message: nodeOk
-      ? `Node ${nodeVersion}`
-      : `Node ${nodeVersion}: se necesita Node ${MIN_NODE[0]}.${MIN_NODE[1]} o superior.`,
+    message: nodeOk ? `Node ${nodeVersion}` : t('doctor.node.old', { version: nodeVersion, min: `${MIN_NODE[0]}.${MIN_NODE[1]}` }),
   });
 
   const specs: Array<{ scope: SettingsSourceInfo['scope']; path: string | undefined }> = [
@@ -1217,12 +1287,7 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
     { scope: 'project', path: path.join(repoRoot, '.claude', 'settings.json') },
     { scope: 'local', path: localSettingsPath(repoRoot) },
   ];
-  const scopeName: Record<SettingsSourceInfo['scope'], string> = {
-    managed: 'administrada',
-    user: 'de usuario',
-    project: 'del proyecto',
-    local: 'local',
-  };
+  const scopeName = (scope: SettingsSourceInfo['scope']): string => t(`doctor.scope.${scope}`);
   const sources: SettingsSourceInfo[] = [];
   const parsed: Array<{ scope: SettingsSourceInfo['scope']; path: string; json: JsonObject }> = [];
   for (const s of specs) {
@@ -1246,7 +1311,7 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
       checks.push({
         id: `json-${s.scope}`,
         status: s.scope === 'local' ? 'error' : 'warn',
-        message: `La configuración ${scopeName[s.scope]} (${s.path}) no es JSON válido.`,
+        message: t('doctor.json.invalid', { scope: scopeName(s.scope), path: s.path }),
       });
     }
   }
@@ -1265,11 +1330,11 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
       id: 'installed',
       status: lock?.alive ? 'ok' : 'warn',
       message: lock?.alive
-        ? `Hooks instalados en el puerto ${installedPorts.join(', ')} (Neurons corriendo, PID ${lock.pid}).`
-        : `Hay hooks de Neurons en el puerto ${installedPorts.join(', ')} pero el visor no está corriendo: Claude Code mostrará "hook error". Ejecutá "neu uninstall".`,
+        ? t('doctor.installed.running', { ports: installedPorts.join(', '), pid: lock.pid })
+        : t('doctor.installed.orphan', { ports: installedPorts.join(', ') }),
     });
   } else {
-    checks.push({ id: 'installed', status: 'info', message: 'Los hooks no están instalados (se instalan al ejecutar "start").' });
+    checks.push({ id: 'installed', status: 'info', message: t('doctor.installed.none') });
   }
 
   if (legacyPorts.length > 0) {
@@ -1277,8 +1342,8 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
       id: 'legacy-hooks',
       status: 'warn',
       message: legacyLock?.alive
-        ? `Hay hooks de la versión anterior (repo-synapse) en el puerto ${legacyPorts.join(', ')}, y esa versión está corriendo (PID ${legacyLock.pid}).`
-        : `Hay hooks de la versión anterior (repo-synapse) en el puerto ${legacyPorts.join(', ')}: los quita el próximo "neu start", "neu install" o "neu uninstall".`,
+        ? t('doctor.legacyHooks.running', { ports: legacyPorts.join(', '), pid: legacyLock.pid })
+        : t('doctor.legacyHooks.stale', { ports: legacyPorts.join(', ') }),
     });
   }
 
@@ -1286,22 +1351,20 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
     checks.push({
       id: 'lock',
       status: lock.alive ? 'info' : 'warn',
-      message: lock.alive
-        ? `Neurons está corriendo sobre este repo (PID ${lock.pid}).`
-        : `Hay un lock viejo (PID ${lock.pid}, ya no es de Neurons). El próximo "start" lo reemplaza.`,
+      message: lock.alive ? t('doctor.lock.running', { pid: lock.pid }) : t('doctor.lock.stale', { pid: lock.pid }),
     });
   }
   if (legacyLock?.alive) {
     checks.push({
       id: 'legacy-lock',
       status: 'warn',
-      message: `La versión anterior (repo-synapse) está corriendo sobre este repo (PID ${legacyLock.pid}): cerrala antes de usar "neu start".`,
+      message: t('doctor.legacyLock', { pid: legacyLock.pid }),
     });
   }
 
   let allowlistSeen = false;
   for (const p of parsed) {
-    const scope = scopeName[p.scope];
+    const scope = scopeName(p.scope);
     const allowed = p.json.allowedHttpHookUrls;
     if (allowed !== undefined) {
       allowlistSeen = true;
@@ -1310,26 +1373,21 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
       checks.push({
         id: `allowlist-${p.scope}`,
         status: ok ? 'ok' : 'error',
-        message: ok
-          ? `allowedHttpHookUrls en la configuración ${scope} permite ${url}.`
-          : `allowedHttpHookUrls en la configuración ${scope} no incluye ${url}. Agregá "http://127.0.0.1:*/hook?src=neurons".`,
+        message: ok ? t('doctor.allowlist.ok', { scope, url }) : t('doctor.allowlist.missing', { scope, url }),
       });
     }
     if (p.json.allowManagedHooksOnly === true) {
       checks.push({
         id: `managed-only-${p.scope}`,
         status: p.scope === 'managed' ? 'error' : 'warn',
-        message:
-          p.scope === 'managed'
-            ? 'allowManagedHooksOnly está activo en la configuración administrada: los hooks de settings.local.json no se ejecutan.'
-            : `allowManagedHooksOnly aparece en la configuración ${scope}; solo tiene efecto en la administrada.`,
+        message: p.scope === 'managed' ? t('doctor.managedOnly.managed') : t('doctor.managedOnly.other', { scope }),
       });
     }
     if (p.json.disableAllHooks === true) {
       checks.push({
         id: `disable-all-${p.scope}`,
         status: 'error',
-        message: `disableAllHooks está activo en la configuración ${scope}: ningún hook se ejecuta.`,
+        message: t('doctor.disableAll', { scope }),
       });
     }
     const strict = p.json.strictPluginOnlyCustomization;
@@ -1337,12 +1395,12 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
       checks.push({
         id: 'strict-plugin-only',
         status: 'error',
-        message: 'strictPluginOnlyCustomization bloquea los hooks de la configuración del proyecto.',
+        message: t('doctor.strictPlugin'),
       });
     }
   }
   if (!allowlistSeen) {
-    checks.push({ id: 'allowlist', status: 'ok', message: 'No hay allowedHttpHookUrls: los hooks HTTP a 127.0.0.1 están permitidos.' });
+    checks.push({ id: 'allowlist', status: 'ok', message: t('doctor.allowlist.none') });
   }
 
   const env = process.env;
@@ -1354,24 +1412,22 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
     checks.push({
       id: 'proxy',
       status: covered ? 'ok' : 'warn',
-      message: covered
-        ? `Hay proxy (${proxies.join(', ')}) y NO_PROXY cubre 127.0.0.1.`
-        : `Hay proxy (${proxies.join(', ')}) y NO_PROXY no cubre 127.0.0.1: los hooks podrían salir por el proxy. Agregá 127.0.0.1 a NO_PROXY.`,
+      message: covered ? t('doctor.proxy.ok', { vars: proxies.join(', ') }) : t('doctor.proxy.warn', { vars: proxies.join(', ') }),
     });
   }
 
   const user = parsed.find((p) => p.scope === 'user');
   const userSource = sources.find((s) => s.scope === 'user');
   if (user?.json.bashEditDiffEnabled === true) {
-    checks.push({ id: 'bash-diff', status: 'ok', message: 'bashEditDiffEnabled está activo en la configuración de usuario.' });
+    checks.push({ id: 'bash-diff', status: 'ok', message: t('doctor.bashDiff.on') });
   } else if (userSource && !userSource.exists) {
     checks.push({
       id: 'bash-diff',
       status: 'info',
-      message: `No existe ${userSource.path}: "start" no puede activar bashEditDiffEnabled (los borrados por Bash se atribuyen por el watcher).`,
+      message: t('doctor.bashDiff.noFile', { path: userSource.path }),
     });
   } else {
-    checks.push({ id: 'bash-diff', status: 'info', message: 'bashEditDiffEnabled está apagado; "start" lo activa mientras corre.' });
+    checks.push({ id: 'bash-diff', status: 'info', message: t('doctor.bashDiff.off') });
   }
 
   // Read only: the legacy record is migrated by the next enable or restore, not by doctor.
@@ -1380,12 +1436,8 @@ export function checkEnvironmentSync(repoRoot: string): DoctorReport {
     const live = bashState.owners.filter((x) => isPidAlive(x.pid));
     checks.push(
       live.length > 0
-        ? { id: 'bash-diff-owners', status: 'info', message: `Neurons activó bashEditDiffEnabled; lo usan ${live.length} visor(es) abierto(s).` }
-        : {
-            id: 'bash-diff-pending',
-            status: 'warn',
-            message: `Quedó pendiente revertir bashEditDiffEnabled en ${bashState.settingsPath}. Ejecutá "neu uninstall" o quitá la clave a mano.`,
-          },
+        ? { id: 'bash-diff-owners', status: 'info', message: tn('doctor.bashDiff.owners', live.length) }
+        : { id: 'bash-diff-pending', status: 'warn', message: t('doctor.bashDiff.pending', { path: bashState.settingsPath }) },
     );
   }
 

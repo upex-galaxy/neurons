@@ -21,6 +21,7 @@ import {
 } from '../../src/cli/registry.ts';
 import { resolveRepoRoot } from '../../src/cli/repo-root.ts';
 import { processCommand } from '../../src/install/settings.ts';
+import { detectLang, setLang } from '../../src/i18n.ts';
 
 const tmpDirs: string[] = [];
 const children: ChildProcess[] = [];
@@ -89,12 +90,20 @@ describe('resolveRepoRoot', () => {
     expect(resolveRepoRoot(path.join(dir, 'x'), () => undefined)).toEqual({ root: path.join(dir, 'x'), given: path.join(dir, 'x'), isGit: false });
   });
 
-  it('fails in Spanish for a missing directory or a file', () => {
+  it('fails in the CLI language for a missing directory or a file', () => {
     const dir = tmp('rs-root-f-');
-    expect(() => resolveRepoRoot(path.join(dir, 'nope'))).toThrow(CliError);
-    expect(() => resolveRepoRoot(path.join(dir, 'nope'))).toThrow(/No existe el directorio/);
-    fs.writeFileSync(path.join(dir, 'file'), 'x');
-    expect(() => resolveRepoRoot(path.join(dir, 'file'))).toThrow(/no es un directorio/);
+    try {
+      setLang('es');
+      expect(() => resolveRepoRoot(path.join(dir, 'nope'))).toThrow(CliError);
+      expect(() => resolveRepoRoot(path.join(dir, 'nope'))).toThrow(/No existe el directorio/);
+      fs.writeFileSync(path.join(dir, 'file'), 'x');
+      expect(() => resolveRepoRoot(path.join(dir, 'file'))).toThrow(/no es un directorio/);
+      setLang('en');
+      expect(() => resolveRepoRoot(path.join(dir, 'nope'))).toThrow(/The directory .* does not exist/);
+      expect(() => resolveRepoRoot(path.join(dir, 'file'))).toThrow(/is not a directory/);
+    } finally {
+      setLang(detectLang());
+    }
   });
 });
 

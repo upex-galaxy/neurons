@@ -3,10 +3,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Normalizer, bashDetail, parseHookPayload, promptDetail, type HookPayload } from '../../src/server/normalize.ts';
+import { bashPrograms } from '../../src/server/bash.ts';
+import { Normalizer, bashCommand, bashDetail, errorLine, parseHookPayload, promptDetail, toolInfo, type HookPayload } from '../../src/server/normalize.ts';
 import { createPathResolver, splitWorktreeRel } from '../../src/server/paths.ts';
 import { TreeIndex, scanTree } from '../../src/server/tree.ts';
 import type { VizEvent } from '../../src/shared/types.ts';
+import { setLang } from '../../src/i18n.ts';
+import { emptyTally, snapshotTally, tallyEvent } from '../../web/src/tools.ts';
+
+// The injected-prompt labels asserted below are the Spanish ones.
+setLang('es');
 
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../fixtures/payloads');
 const FAKE_HOME = '/Users/fake-home';
@@ -389,19 +395,49 @@ describe('Normalizer: other rules', () => {
     expect(JSON.stringify(evs)).not.toContain('HUNK-SECRET');
   });
 
-  it('PermissionDenied -> tool action with phase fail and detail denied', async () => {
+  it('a multi-file Bash call is several events but one call in the Tools counters', async () => {
     const { normalizer } = await makeNormalizer();
-    expect(main(normalizer.normalize(ev({ hook_event_name: 'PermissionDenied', tool_name: 'Bash', tool_use_id: 'd1', tool_input: { command: 'rm -rf src' } })))).toMatchObject({ action: 'delete', phase: 'fail', detail: 'denied', paths: ['src'] });
-    expect(main(normalizer.normalize(ev({ hook_event_name: 'PermissionDenied', tool_name: 'Read', tool_input: { file_path: 'src/api/user.ts' } })))).toMatchObject({ action: 'read', phase: 'fail', detail: 'denied' });
+    const evs = normalizer
+      .normalize(
+        ev({
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_use_id: 'multi1',
+          tool_input: { command: 'npx prettier --write src' },
+          tool_response: {
+            stdout: '',
+            bashEditDiff: {
+              files: ['src/api/user.ts', 'src/api/order.ts', 'src/utils/format.ts'].map((rel) => ({ filePath: path.join(repo, rel), hunks: [] })),
+            },
+          },
+        }),
+      )
+      .filter((e) => e.action !== 'session_start');
+    expect(evs).toHaveLength(3);
+    const tally = emptyTally();
+    for (const e of evs) tallyEvent(tally, e);
+    expect(snapshotTally(tally)).toMatchObject({ cli: { npx: 1 }, builtin: { Bash: 1 } });
+  });
+
+  it('PermissionDenied -> tool action with phase fail and the denied flag (no English word in detail)', async () => {
+    const { normalizer } = await makeNormalizer();
+    const bash = main(normalizer.normalize(ev({ hook_event_name: 'PermissionDenied', tool_name: 'Bash', tool_use_id: 'd1', tool_input: { command: 'rm -rf src' } })));
+    expect(bash).toMatchObject({ action: 'delete', phase: 'fail', denied: true, detail: 'rm -rf src', paths: ['src'] });
+    const read = main(normalizer.normalize(ev({ hook_event_name: 'PermissionDenied', tool_name: 'Read', tool_input: { file_path: 'src/api/user.ts' } })));
+    expect(read).toMatchObject({ action: 'read', phase: 'fail', denied: true });
+    expect(read.detail).not.toBe('denied');
+    const post = main(normalizer.normalize(ev({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: 'src/api/user.ts' } })));
+    expect(post.denied).toBeUndefined();
   });
 
   it('other tools -> tool; file_path/path used when it resolves', async () => {
     const { normalizer } = await makeNormalizer();
     expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'WebFetch', tool_input: { url: 'https://x', prompt: 'p' } })))).toMatchObject({ action: 'tool', toolName: 'WebFetch', paths: [] });
-    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Skill', tool_input: { skill: 'x' } })))).toMatchObject({ action: 'tool', toolName: 'Skill', paths: [] });
-    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'mcp__fs__read', tool_input: { file_path: path.join(repo, 'docs/old.md') } })))).toMatchObject({ action: 'tool', paths: ['docs/old.md'] });
-    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'mcp__x__y', tool_input: { path: 'src' } })))).toMatchObject({ action: 'tool', paths: ['src'] });
-    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'mcp__x__y', tool_input: { path: '/api/v1/users' } })))).toMatchObject({ action: 'tool', paths: [] });
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'WebFetch', tool_input: { url: 'https://x', prompt: 'p' } }))).tool).toEqual({ kind: 'builtin', name: 'WebFetch' });
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Skill', tool_input: { skill: 'x' } })))).toMatchObject({ action: 'skill', toolName: 'Skill', paths: [], detail: 'x', tool: { kind: 'skill', name: 'x' } });
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'mcp__fs__read', tool_input: { file_path: path.join(repo, 'docs/old.md') } })))).toMatchObject({ action: 'mcp', paths: ['docs/old.md'], detail: 'fs/read' });
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'mcp__x__y', tool_input: { path: 'src' } })))).toMatchObject({ action: 'mcp', paths: ['src'] });
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'mcp__x__y', tool_input: { path: '/api/v1/users' } })))).toMatchObject({ action: 'mcp', paths: [] });
   });
 
   it('paths in .git or .neurons are dropped', async () => {
@@ -604,6 +640,139 @@ describe('Normalizer: prompts injected by Claude Code', () => {
   });
 });
 
+describe('Normalizer: tool metadata (tool, cli, command, description, durationMs, error, pattern)', () => {
+  const ev = (e: Record<string, unknown>): HookPayload => ({ session_id: 's6', cwd: repo, ...e }) as unknown as HookPayload;
+
+  it('Skill and MCP from the real fixture (run-skill-mcp)', async () => {
+    const { perPayload, payloads, all } = await runFixture('run-skill-mcp.jsonl');
+    const idx = (event: string, tool: string) => payloads.findIndex((p) => p.hook_event_name === event && p.tool_name === tool);
+    const skillPre = main(perPayload[idx('PreToolUse', 'Skill')] as VizEvent[]);
+    expect(skillPre).toMatchObject({ action: 'skill', phase: 'pre', paths: [], detail: 'humanizer', tool: { kind: 'skill', name: 'humanizer' } });
+    expect(skillPre.durationMs).toBeUndefined();
+    const skillPost = main(perPayload[idx('PostToolUse', 'Skill')] as VizEvent[]);
+    expect(skillPost).toMatchObject({ action: 'skill', phase: 'post', durationMs: 7 });
+
+    const mcpName = 'mcp__context7__resolve-library-id';
+    const mcpPre = main(perPayload[idx('PreToolUse', mcpName)] as VizEvent[]);
+    expect(mcpPre).toMatchObject({ action: 'mcp', phase: 'pre', paths: [], detail: 'context7/resolve-library-id', toolName: mcpName });
+    expect(mcpPre.tool).toEqual({ kind: 'mcp', name: 'resolve-library-id', server: 'context7' });
+    expect(main(perPayload[idx('PostToolUse', mcpName)] as VizEvent[])).toMatchObject({ action: 'mcp', phase: 'post', durationMs: 1611 });
+
+    // The MCP tool input (the query typed for it) and its response never leave the normalizer.
+    const json = JSON.stringify(all);
+    for (const p of payloads.filter((x) => x.tool_name === mcpName)) {
+      for (const v of Object.values((p.tool_input ?? {}) as Record<string, unknown>)) {
+        if (typeof v === 'string' && v.length >= 8) expect(json).not.toContain(v);
+      }
+    }
+  });
+
+  it('MCP names: payload server name wins, plugin servers with underscores, no server info', () => {
+    expect(toolInfo('mcp__plugin_engram_engram__mem_save', {}, undefined)).toEqual({ kind: 'mcp', name: 'mem_save', server: 'plugin_engram_engram' });
+    expect(toolInfo('mcp__claude_ai_Slack__slack_send', {}, { name: 'claude.ai Slack' })).toEqual({ kind: 'mcp', name: 'slack_send', server: 'claude.ai Slack' });
+    expect(toolInfo('mcp__a__b__c', {}, { name: 'a__b' })).toEqual({ kind: 'mcp', name: 'c', server: 'a__b' });
+    expect(toolInfo('mcp__solo', {}, undefined)).toEqual({ kind: 'mcp', name: 'solo', server: 'solo' });
+    expect(toolInfo('Skill', {}, undefined)).toEqual({ kind: 'skill', name: '?' });
+    expect(toolInfo('Bash', { skill: 'x' }, undefined)).toEqual({ kind: 'builtin', name: 'Bash' });
+  });
+
+  it('run1: Bash carries cli, command and description; Post the duration; Failure the first error line', async () => {
+    const { perPayload, payloads } = await runFixture('run1.jsonl');
+    const pre = main(perPayload[2] as VizEvent[]);
+    expect(pre.tool).toEqual({ kind: 'builtin', name: 'Bash' });
+    expect(pre.cli).toEqual(['find', 'grep']);
+    expect(pre.command?.startsWith('find . -name "*.ts"')).toBe(true);
+    expect(pre.description).toBe((payloads[2]?.tool_input as { description: string }).description);
+    expect(pre.pattern).toBe('*.ts');
+    expect(pre.durationMs).toBeUndefined();
+    expect(main(perPayload[3] as VizEvent[]).durationMs).toBe(74);
+
+    const fail = main(perPayload[25] as VizEvent[]);
+    expect(fail).toMatchObject({ phase: 'fail', error: 'Exit code 1', durationMs: 8, cli: ['cat'], command: 'cat does-not-exist.txt' });
+    expect(JSON.stringify(fail)).not.toContain('No such file');
+
+    const agent = main(perPayload[27] as VizEvent[]);
+    expect(agent).toMatchObject({ action: 'tool', tool: { kind: 'builtin', name: 'Agent' }, description: 'Read order.ts export' });
+    expect(main(perPayload[35] as VizEvent[]).durationMs).toBe(3243);
+    expect(main(perPayload[5] as VizEvent[]).tool).toEqual({ kind: 'builtin', name: 'Read' });
+    // Non-tool events carry none of it.
+    expect(main(perPayload[1] as VizEvent[]).tool).toBeUndefined();
+  });
+
+  it('Glob/Grep pattern; Bash rg pattern; description capped at 300 chars on one line', async () => {
+    const { normalizer } = await makeNormalizer();
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Grep', tool_input: { pattern: 'TODO|FIXME', path: 'src' } }))).pattern).toBe('TODO|FIXME');
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Glob', tool_input: { pattern: '**/*.ts' } }))).pattern).toBe('**/*.ts');
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'rg -n "useState" web/src' } }))).pattern).toBe('useState');
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'npm test' } }))).pattern).toBeUndefined();
+    const long = main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls', description: `line one\n${'x'.repeat(400)}` } })));
+    expect(long.description).toHaveLength(300);
+    expect(long.description).not.toContain('\n');
+  });
+
+  it('error is one line, at most 200 chars, without wrapper tags; denied events have no duration', async () => {
+    const { normalizer } = await makeNormalizer();
+    const fail = (error: unknown) =>
+      main(normalizer.normalize(ev({ hook_event_name: 'PostToolUseFailure', tool_name: 'Edit', tool_input: { file_path: 'src/api/user.ts' }, error, duration_ms: 3.6 })));
+    const e1 = fail('<tool_use_error>String to replace not found in file.\nString: SECRET_OLD_STRING</tool_use_error>');
+    expect(e1.error).toBe('String to replace not found in file.');
+    expect(e1.durationMs).toBe(4);
+    expect(JSON.stringify(e1)).not.toContain('SECRET_OLD_STRING');
+    const e2 = fail(`\n\n${'e'.repeat(500)}\nsecond`);
+    expect(e2.error).toHaveLength(200);
+    expect(e2.error).not.toContain('\n');
+    expect(fail(42).error).toBeUndefined();
+    expect(errorLine('  \n ')).toBeUndefined();
+    const denied = main(normalizer.normalize(ev({ hook_event_name: 'PermissionDenied', tool_name: 'Bash', tool_input: { command: 'rm -rf src' }, duration_ms: 5 })));
+    expect(denied.durationMs).toBeUndefined();
+    expect(denied.denied).toBe(true);
+    expect(denied.detail).not.toBe('denied');
+  });
+
+  it('cli: programs after wrappers and env assignments, no keywords or builtins, at most 8', () => {
+    expect(bashPrograms('cd web && NODE_ENV=test npx vitest run | tee out.log')).toEqual(['npx', 'tee']);
+    expect(bashPrograms('sudo -u root /usr/bin/env FOO=1 time git status; find . | xargs -n1 rm')).toEqual(['git', 'find', 'rm']);
+    expect(bashPrograms('if [ -f x ]; then echo yes; else exit 1; fi')).toEqual(['echo', 'exit']);
+    expect(bashPrograms('for f in *.ts; do wc -l "$f"; done')).toEqual(['wc']);
+    expect(bashPrograms('$CMD --flag && "C:\\\\Program Files\\\\Git\\\\bin\\\\git.exe" log')).toEqual(['git']);
+    expect(bashPrograms("cat > f <<'EOF'\nrm -rf /\nEOF\nls")).toEqual(['cat', 'ls']);
+    expect(bashPrograms('a; b; c; d; e; f; g; h; i; j')).toHaveLength(8);
+    expect(bashPrograms('')).toEqual([]);
+  });
+});
+
+describe('bashCommand', () => {
+  it('keeps the shape and newlines of commands that do not write', () => {
+    expect(bashCommand('npm run build && \\\n  npm test')).toBe('npm run build && \\\n  npm test');
+    expect(bashCommand('git status\ngit log --oneline -5')).toBe('git status\ngit log --oneline -5');
+    expect(bashCommand('grep -rn "TODO" src 2>/dev/null')).toBe('grep -rn "TODO" src 2>/dev/null');
+    expect(bashCommand('x'.repeat(3000))).toHaveLength(2000);
+  });
+
+  it('cuts heredoc bodies, also inside $( ) and with <<-', () => {
+    expect(bashCommand("cat > .env <<'EOF'\nSTRIPE_KEY=sk_live_123456789\nEOF\nnpm test")).toBe("cat > .env <<'…'\n…\nEOF\nnpm test");
+    const commit = bashCommand(`git commit -m "$(cat <<'EOF'\nfeat: PRIVATE COMMIT BODY\nEOF\n)"\ngit log -1`);
+    expect(commit).not.toContain('PRIVATE COMMIT BODY');
+    expect(commit.endsWith('git log -1')).toBe(true);
+    expect(bashCommand('cat <<-END > x\n\tSECRET_TABBED\n\tEND\nls')).not.toContain('SECRET_TABBED');
+    // A heredoc never closed hides everything after it.
+    expect(bashCommand('python3 - <<PY\nprint("SECRET_UNCLOSED")\nmore')).not.toContain('SECRET_UNCLOSED');
+  });
+
+  it('redacts literals across lines when the statement writes or runs inline code', () => {
+    const multi = bashCommand('echo "first line\nMULTILINE_SECRET" > notes.txt\nls -la');
+    expect(multi).toBe('echo … > notes.txt\nls -la');
+    expect(bashCommand(`node -e 'require("fs").writeFileSync("x", "SUPERSECRET")'`)).toBe("node -e '…'");
+    expect(bashCommand(`python3 -c "\nopen('a','w').write('TOKEN_X')\n"`)).toBe('python3 -c "…"');
+    expect(bashCommand('cat <<< "HERE STRING SECRET" > .env')).toBe('cat <<< … > .env');
+    expect(bashCommand("printf $'a\\'SECRET_ANSI' > f")).not.toContain('SECRET_ANSI');
+    // An unterminated literal keeps only its quote.
+    expect(bashCommand("echo 'never closed\nSECRET_TAIL")).toBe("echo '…");
+    // Comments are not quotes.
+    expect(bashCommand("# don't panic\nls")).toBe("# don't panic\nls");
+  });
+});
+
 describe('privacy', () => {
   /** Strings that must never leave the normalizer: file contents, edit strings, stdout text, hunk lines. */
   function secretsFrom(payloads: HookPayload[]): string[] {
@@ -642,7 +811,7 @@ describe('privacy', () => {
   }
 
   it('events contain no file contents, old/new strings, hunks or stdout text', async () => {
-    for (const name of ['run1.jsonl', 'run3.jsonl']) {
+    for (const name of ['run1.jsonl', 'run3.jsonl', 'run-skill-mcp.jsonl']) {
       const { payloads, all } = await runFixture(name);
       const secrets = secretsFrom(payloads);
       // run3 only carries short hunk lines ("-legacy", "+hi") that also appear in paths/commands.

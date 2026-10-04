@@ -1,6 +1,6 @@
 {
   "name": "neurons-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Neurons: live 3D view of what Claude Code reads, edits, creates and deletes in a repository, driven by Claude Code HTTP hooks.",
   "type": "module",
   "license": "MIT",
@@ -16,9 +16,10 @@
   },
   "scripts": {
     "dev": "tsx src/cli.ts",
-    "build": "npm run build:web && npm run build:cli",
+    "build": "npm run build:web && npm run build:cli && npm run build:docs",
     "build:web": "vite build --config web/vite.config.ts",
     "build:cli": "tsdown",
+    "build:docs": "node scripts/build-docs.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json",
     "test": "npm run build && npm run test:unit && npm run test:e2e",
     "test:unit": "vitest run && vitest run --config web/vitest.config.ts",

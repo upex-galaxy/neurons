@@ -10,6 +10,7 @@ import {
   checkEnvironmentSync,
   bashDiffStateDir,
   commandRunsScript,
+  parseWin32ProcessInfo,
   enableBashEditDiff,
   ensureGitExcluded,
   installHooksSync,
@@ -909,6 +910,17 @@ describe('acquireLockSync', () => {
     expect(commandRunsScript('node /other/opt/app/dist/cli.js', '/opt/app/dist/cli.js')).toBe(false);
     expect(commandRunsScript('/usr/local/bin/neu', '/usr/local/bin/neu')).toBe(true);
     expect(commandRunsScript('node\t/usr/local/bin/neurons\tstart', '/usr/local/bin/neu')).toBe(true);
+  });
+
+  it('Windows: a quoted script path is a whole argument; WMI output parses', () => {
+    const cli = 'C:\\Users\\Me\\AppData\\Roaming\\npm\\node_modules\\neurons-cli\\dist\\cli.mjs';
+    expect(commandRunsScript(`"C:\\Program Files\\nodejs\\node.exe" "${cli}" start`, cli)).toBe(true);
+    expect(commandRunsScript(`"C:\\Program Files\\nodejs\\node.exe" "${cli}.bak" start`, cli)).toBe(false);
+    expect(parseWin32ProcessInfo('2026-10-04T12:00:00.0000000Z\r\n"node.exe" "C:\\x\\cli.mjs" start\r\n')).toEqual({
+      startMs: Date.parse('2026-10-04T12:00:00Z'),
+      command: '"node.exe" "C:\\x\\cli.mjs" start',
+    });
+    expect(parseWin32ProcessInfo('')).toBeUndefined();
   });
 
   // Regression (F8 follow-up): the takeover moved the lock aside before checking it, so a
