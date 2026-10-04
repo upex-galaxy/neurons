@@ -525,21 +525,23 @@ describe('watch mode selection (Linux: one non-recursive watch per indexed dir)'
       { 'a.txt': 'a', 'src/b.ts': 'b', 'src/lib/c.ts': 'c', 'node_modules/pkg/index.js': 'x', '.gitignore': 'node_modules\n' },
       { git: true, platform: 'linux', watch: spy.watch, gitIgnore: true },
     );
-    await waitFor(() => spy.watched.length >= 3);
+    // CI runners are slow here: several git spawns and the disk walk happen before the first
+    // assertion, so this test waits up to 10 s per step like the other per-directory tests.
+    await waitFor(() => spy.watched.length >= 3, 10_000);
     await sleep(100); // the disk walk for unindexed folders must not add node_modules
     const rels = spy.watched.map((p) => path.relative(s.root, p).split(path.sep).join('/'));
     expect(rels.sort()).toEqual(['', 'src', 'src/lib']);
     // Changes in a nested known dir and in a new subtree are seen.
     fs.writeFileSync(path.join(s.root, 'src/lib/d.ts'), 'd');
-    await waitFor(() => has(s.changes, 'add', 'src/lib/d.ts'));
+    await waitFor(() => has(s.changes, 'add', 'src/lib/d.ts'), 10_000);
     fs.mkdirSync(path.join(s.root, 'x/y'), { recursive: true });
-    await waitFor(() => has(s.changes, 'addDir', 'x/y'));
+    await waitFor(() => has(s.changes, 'addDir', 'x/y'), 10_000);
     fs.writeFileSync(path.join(s.root, 'x/y/z.txt'), 'z');
-    await waitFor(() => has(s.changes, 'add', 'x/y/z.txt'));
+    await waitFor(() => has(s.changes, 'add', 'x/y/z.txt'), 10_000);
     expect(spy.open()).toBe(5);
     // A removed dir drops its watches (and its subtree's).
     fs.rmSync(path.join(s.root, 'x'), { recursive: true });
-    await waitFor(() => has(s.changes, 'unlinkDir', 'x'));
+    await waitFor(() => has(s.changes, 'unlinkDir', 'x'), 10_000);
     expect(spy.open()).toBe(3);
     await handles.pop()?.close();
     expect(spy.open()).toBe(0);
