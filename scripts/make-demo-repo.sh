@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Creates the small demo repository used by docs/DEMO.md.
+# Creates the small demo repository used in the guide (docs/guide.html#faq-demo-small).
 # Usage: scripts/make-demo-repo.sh [target-dir]   (default: ~/neurons-demo)
 set -euo pipefail
 

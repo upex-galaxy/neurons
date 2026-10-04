@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (web, CLI, docs)
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit and integration tests (server, CLI)
+        run: npx vitest run
+
+      - name: Unit tests (web)
+        run: npx vitest run --config web/vitest.config.ts
+
+      # E2E drives the built CLI in Chromium; Linux only, to keep the matrix fast.
+      - name: Install Playwright Chromium
+        if: matrix.os == 'ubuntu-latest'
+        run: npx playwright install --with-deps chromium
+
+      - name: E2E tests (Playwright)
+        if: matrix.os == 'ubuntu-latest'
+        run: npx playwright test
+
+      - name: Upload Playwright traces
+        if: failure() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-node${{ matrix.node }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7

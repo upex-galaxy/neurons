@@ -1,73 +1,73 @@
-# repo-synapse: plan de implementación
+# repo-synapse: implementation plan
 
-> El 2026-10-03 el producto pasó a llamarse **Neurons** (comando `neu`). Este plan quedó como se escribió, con los nombres de entonces: `repo-synapse` es hoy `neu`, `.repo-synapse/` es `.neurons/` y `?src=repo-synapse` es `?src=neurons`. El cambio y la compatibilidad con lo viejo están en `DECISIONS.md` (I28).
+> On 2026-10-03 the product was renamed **Neurons** (command `neu`). This plan stays as it was written, with the names of the time: `repo-synapse` is now `neu`, `.repo-synapse/` is `.neurons/` and `?src=repo-synapse` is `?src=neurons`. The rename and the compatibility with the old names are in `DECISIONS.md` (I28). What changed in 0.3 (bilingual UI, docs routes, Timeline, tool tracking, command detail, now stream, resizable panel, cross-platform work) is in `DECISIONS.md`, I40 to I48.
 
-Plan definitivo, escrito antes de implementar. Parte del documento de idea original y lo corrige con lo verificado contra la documentación oficial (`code.claude.com/docs/en/hooks`, `hooks-guide`, `settings`) y contra el binario instalado (`claude 2.1.285`, macOS arm64). Las decisiones y sus motivos están en `DECISIONS.md`.
+Final plan, written before implementing. It starts from the original idea document and corrects it with what was verified against the official documentation (`code.claude.com/docs/en/hooks`, `hooks-guide`, `settings`) and against the installed binary (`claude 2.1.285`, macOS arm64). The decisions and their reasons are in `DECISIONS.md`.
 
-## 1. Qué construimos
+## 1. What we build
 
-Un CLI de Node (`repo-synapse`) que, apuntado a un repositorio:
+A Node CLI (`repo-synapse`) that, pointed at a repository:
 
-1. Construye el árbol del repo (`git ls-files --cached --others --exclude-standard`, o recorrido con exclusiones si no es git).
-2. Levanta un servidor en `127.0.0.1:<puerto>` que recibe hooks HTTP de Claude Code, los normaliza a `VizEvent`, los guarda en `.repo-synapse/events.jsonl` y los emite por WebSocket.
-3. Instala sus hooks en `<repo>/.claude/settings.local.json` al arrancar y los quita al salir.
-4. Sirve una página 3D (3d-force-graph + bloom) donde cada archivo y carpeta es un nodo y la luz viaja raíz -> carpeta -> archivo con el color de la acción.
+1. Builds the repo tree (`git ls-files --cached --others --exclude-standard`, or a walk with exclusions if it is not git).
+2. Starts a server on `127.0.0.1:<port>` that receives Claude Code HTTP hooks, normalizes them into `VizEvent`, stores them in `.repo-synapse/events.jsonl` and broadcasts them over WebSocket.
+3. Installs its hooks in `<repo>/.claude/settings.local.json` on startup and removes them on exit.
+4. Serves a 3D page (3d-force-graph + bloom) where every file and folder is a node and the light travels root -> folder -> file in the color of the action.
 
 ```
-Claude Code ──POST /hook (http hook, 204 vacío)──▶ servidor 127.0.0.1:7777 ──WS /ws──▶ navegador
+Claude Code ──POST /hook (http hook, empty 204)──▶ server 127.0.0.1:7777 ──WS /ws──▶ browser
                                                      ▲        │
-                              fs.watch recursivo ────┘        └──▶ .repo-synapse/events.jsonl
+                            recursive fs.watch ──────┘        └──▶ .repo-synapse/events.jsonl
 ```
 
-## 2. Hechos verificados que condicionan el diseño
+## 2. Verified facts that shape the design
 
-| Hecho | Consecuencia |
+| Fact | Consequence |
 |---|---|
-| HTTP hook: 2xx con body vacío = sin decisión. Body de texto plano (`OK`) = error no bloqueante visible | `POST /hook` responde `204` sin body, antes de procesar. Nunca JSON con campos de decisión |
-| Servidor caído: cada evento de herramienta muestra `<Evento> hook error` en rojo | Los hooks solo existen mientras corre `start` (se instalan al arrancar, se quitan al salir) |
-| Servidor colgado: la tool call espera hasta `timeout` (default 600 s) | `timeout: 2` en cada hook; el handler hace ack inmediato |
-| `SessionStart` y `Setup` no admiten `type: "http"` | La sesión se crea al ver el primer `session_id` |
-| No hay `async` para hooks HTTP | Respuesta inmediata; el trabajo pesado va después del `res.end()` |
-| Guard SSRF: solo loopback. `allowedHttpHookUrls` compara el host literal | URL fija `http://127.0.0.1:<port>/hook?src=repo-synapse`; `doctor` revisa allowlist y proxies |
-| `maxRedirects: 0` | `/hook` se sirve directo, sin normalizar barras |
-| Payloads grandes (`Read` trae el contenido en `tool_response`) | Sin límite chico de body; se descarta todo contenido al normalizar |
-| Build nativo de macOS: no hay herramientas `Glob`/`Grep`; Claude busca con `bfs`/`ugrep`/`grep`/`rg` vía Bash | Clasificador de comandos Bash (búsqueda, borrado, movimiento). Handlers de Glob/Grep se mantienen por compatibilidad |
-| `PostToolUse(Bash).tool_response.bashEditDiff` puede listar archivos cambiados (`bashEditDiffEnabled`, solo en config de usuario) | Atribución exacta cuando está; watcher + ventanas como respaldo. Se confirma en la fase 0 |
-| `PostToolBatch`, `PostToolUseFailure` (`error`, `is_interrupt`), `InstructionsLoaded` (`file_path`, `memory_type`, `load_reason`, `trigger_file_path`, sin `agent_id`) existen | Se registran todos |
-| Subagente se identifica por `agent_id` (no por `agent_type`) | Color por `agent_id` |
-| Post puede llegar en cualquier orden con llamadas en paralelo; una cancelación no dispara Post | Ventanas por `tool_use_id`, cierre también en `Stop`, `UserPromptSubmit` siguiente y TTL |
-| No suscribirse a `WorktreeCreate`/`WorktreeRemove`/`PreModelSwitch` | Un receptor pasivo rompe esos flujos |
-| chokidar 5 en macOS abre un fd por archivo (EMFILE a ~60k) | `fs.watch(root, {recursive: true})` (FSEvents) + clasificación por `stat` + índice propio |
-| `emitParticle(link)` exige el objeto link vivo y cubre un solo salto; la velocidad es por frame | Mapa `parent->child` a links vivos; saltos encadenados con retardo |
+| HTTP hook: 2xx with an empty body = no decision. A plain text body (`OK`) = visible non-blocking error | `POST /hook` answers `204` with no body, before processing. Never JSON with decision fields |
+| Server down: every tool event shows `<Event> hook error` in red | The hooks only exist while `start` runs (installed on startup, removed on exit) |
+| Server hung: the tool call waits up to `timeout` (default 600 s) | `timeout: 2` on every hook; the handler acks at once |
+| `SessionStart` and `Setup` do not accept `type: "http"` | The session is created when the first `session_id` is seen |
+| There is no `async` for HTTP hooks | Immediate response; the heavy work happens after `res.end()` |
+| SSRF guard: loopback only. `allowedHttpHookUrls` compares the literal host | Fixed URL `http://127.0.0.1:<port>/hook?src=repo-synapse`; `doctor` checks the allowlist and proxies |
+| `maxRedirects: 0` | `/hook` is served directly, without normalizing slashes |
+| Large payloads (`Read` carries the content in `tool_response`) | No small body limit; all content is dropped during normalization |
+| Native macOS build: there are no `Glob`/`Grep` tools; Claude searches with `bfs`/`ugrep`/`grep`/`rg` through Bash | Bash command classifier (search, delete, move). Glob/Grep handlers are kept for compatibility |
+| `PostToolUse(Bash).tool_response.bashEditDiff` can list the changed files (`bashEditDiffEnabled`, user settings only) | Exact attribution when present; watcher + windows as fallback. Confirmed in phase 0 |
+| `PostToolBatch`, `PostToolUseFailure` (`error`, `is_interrupt`), `InstructionsLoaded` (`file_path`, `memory_type`, `load_reason`, `trigger_file_path`, no `agent_id`) exist | All of them are recorded |
+| A subagent is identified by `agent_id` (not by `agent_type`) | Color by `agent_id` |
+| Post can arrive in any order with parallel calls; a cancellation fires no Post | Windows per `tool_use_id`, also closed on `Stop`, the next `UserPromptSubmit` and a TTL |
+| Do not subscribe to `WorktreeCreate`/`WorktreeRemove`/`PreModelSwitch` | A passive receiver breaks those flows |
+| chokidar 5 on macOS opens one fd per file (EMFILE at ~60k) | `fs.watch(root, {recursive: true})` (FSEvents) + classification by `stat` + our own index |
+| `emitParticle(link)` needs the live link object and covers a single hop; speed is per frame | `parent->child` map to live links; chained hops with a delay |
 
 ## 3. Stack
 
-Node >= 22.12 (probado en 26), TypeScript, ESM. Servidor con `node:http` + `ws` (sin framework). Frontend con Vite + TS, `3d-force-graph` 1.80, `three` 0.186, `force-graph` para el modo 2D. Build del CLI con `tsdown`, desarrollo con `tsx`. Pruebas con Vitest 5 y Playwright.
+Node >= 22.12 (tested on 26), TypeScript, ESM. Server with `node:http` + `ws` (no framework). Frontend with Vite + TS, `3d-force-graph` 1.80, `three` 0.186, `force-graph` for the 2D mode. CLI build with `tsdown`, development with `tsx`. Tests with Vitest 5 and Playwright.
 
-## 4. Estructura del repo
+## 4. Repo layout
 
 ```
 src/
-  cli.ts                 comandos start | install | uninstall | replay | doctor
-  shared/types.ts        VizEvent, TreeNode, mensajes WS
+  cli.ts                 commands start | install | uninstall | replay | doctor
+  shared/types.ts        VizEvent, TreeNode, WS messages
   server/
-    server.ts            node:http + ws, rutas, ring buffer, broadcast
-    tree.ts              escaneo inicial e índice de rutas
-    paths.ts             relativización, dentro/fuera del repo
-    normalize.ts         payload de hook -> VizEvent[]
-    bash.ts              clasificador de comandos Bash
-    attribution.ts       ventanas por tool_use_id, dedupe, bashEditDiff
-    watcher.ts           fs.watch recursivo + clasificación
-    eventlog.ts          append a .repo-synapse/events.jsonl
-  install/settings.ts    merge/unmerge de hooks, backup, manifiesto, exclude
-web/                     frontend Vite (index.html, src/*.ts)
-scripts/probe/           grabador y guion de la fase 0
+    server.ts            node:http + ws, routes, ring buffer, broadcast
+    tree.ts              initial scan and path index
+    paths.ts             relativization, inside/outside the repo
+    normalize.ts         hook payload -> VizEvent[]
+    bash.ts              Bash command classifier
+    attribution.ts       windows per tool_use_id, dedupe, bashEditDiff
+    watcher.ts           recursive fs.watch + classification
+    eventlog.ts          append to .repo-synapse/events.jsonl
+  install/settings.ts    hook merge/unmerge, backup, manifest, exclude
+web/                     Vite frontend (index.html, src/*.ts)
+scripts/probe/           phase 0 recorder and script
 scripts/make-demo-repo.sh
 test/unit | test/integration | test/e2e | test/fixtures/payloads
 docs/
 ```
 
-## 5. Modelo de evento
+## 5. Event model
 
 ```ts
 type Action = "read" | "edit" | "create" | "delete" | "move" | "search" | "bash"
@@ -79,102 +79,102 @@ type VizEvent = {
   agentId?: string; agentType?: string; toolUseId?: string; toolName?: string;
   phase: "pre" | "post" | "fail" | "info";
   action: Action;
-  paths: string[];          // relativas al repo, con "/"
-  outsideRepo?: string[];   // absolutas, fuera del repo
-  secondary?: string[];     // resultados de búsqueda (destello secundario)
-  detail?: string;          // patrón, comando truncado a 120, load_reason
+  paths: string[];          // relative to the repo, with "/"
+  outsideRepo?: string[];   // absolute, outside the repo
+  secondary?: string[];     // search results (secondary flash)
+  detail?: string;          // pattern, command truncated to 120, load_reason
   source: "hook" | "watcher";
-  external?: boolean;       // cambio de disco sin ventana de Claude
+  external?: boolean;       // disk change with no Claude window
 };
 ```
 
-Mensajes WS servidor -> cliente: `hello` (raíz, árbol, últimos 500 eventos, sesiones), `event`, `tree` (`added`, `removed`). Se ajusta tras la fase 0.
+WS messages server -> client: `hello` (root, tree, last 500 events, sessions), `event`, `tree` (`added`, `removed`). Adjusted after phase 0.
 
-## 6. Reglas de normalización
+## 6. Normalization rules
 
-- `Read` -> `read`. `Edit`, `MultiEdit`, `NotebookEdit` -> `edit`. `Write` -> `create` si el archivo no existe en el `PreToolUse` (se recuerda por `tool_use_id`; en Post manda `tool_response.type` si viene).
-- `Glob`/`Grep` -> `search` sobre `tool_input.path` (resuelto contra `cwd`) o la raíz; rutas de `tool_response` como `secondary`.
-- `Bash`: clasificación del comando. Búsqueda (`grep`, `rg`, `ugrep`, `bfs`, `find`, `fd`, `ls`, `tree`, `ag`) -> `search`; `rm`/`git rm`/`unlink`/`rmdir` -> `delete`; `mv`/`git mv` -> `move`; el resto -> `bash`. Rutas candidatas: argumentos que resuelven dentro del repo. En Post, `bashEditDiff` produce eventos exactos por archivo.
-- `Agent`/`Task` -> `tool` con la descripción; el ciclo de vida sale de `SubagentStart`/`SubagentStop`.
-- `InstructionsLoaded` -> `context_load` sobre `file_path` (satélite si está fuera), `detail` = `load_reason`.
-- `UserPromptSubmit` -> `turn_start` (prompt truncado a 120). `Stop` -> `turn_end`. `SessionEnd` -> `session_end`. `PostToolBatch` -> `batch_end`. `PreCompact`/`PostCompact` -> `compact`.
-- `PostToolUseFailure` -> misma acción con `phase: "fail"`.
-- Nunca se reenvía ni se persiste `content`, `old_string`, `new_string`, `tool_response` crudo ni diffs.
+- `Read` -> `read`. `Edit`, `MultiEdit`, `NotebookEdit` -> `edit`. `Write` -> `create` if the file does not exist at `PreToolUse` (remembered by `tool_use_id`; in Post, `tool_response.type` wins when present).
+- `Glob`/`Grep` -> `search` on `tool_input.path` (resolved against `cwd`) or the root; paths from `tool_response` as `secondary`.
+- `Bash`: command classification. Search (`grep`, `rg`, `ugrep`, `bfs`, `find`, `fd`, `ls`, `tree`, `ag`) -> `search`; `rm`/`git rm`/`unlink`/`rmdir` -> `delete`; `mv`/`git mv` -> `move`; the rest -> `bash`. Candidate paths: arguments that resolve inside the repo. In Post, `bashEditDiff` produces exact per-file events.
+- `Agent`/`Task` -> `tool` with the description; the lifecycle comes from `SubagentStart`/`SubagentStop`.
+- `InstructionsLoaded` -> `context_load` on `file_path` (a satellite if it is outside), `detail` = `load_reason`.
+- `UserPromptSubmit` -> `turn_start` (prompt truncated to 120). `Stop` -> `turn_end`. `SessionEnd` -> `session_end`. `PostToolBatch` -> `batch_end`. `PreCompact`/`PostCompact` -> `compact`.
+- `PostToolUseFailure` -> same action with `phase: "fail"`.
+- `content`, `old_string`, `new_string`, raw `tool_response` and diffs are never forwarded or stored.
 
-## 7. Watcher y atribución
+## 7. Watcher and attribution
 
-- Índice en memoria desde el escaneo inicial. `fs.watch` recursivo; por cada ruta, coalescencia de 40 ms y `lstat` para decidir `add`/`addDir`/`change`/`unlink`/`unlinkDir`. Un par `unlink`+`add` dentro de la misma ventana se reporta como `move`.
-- Exclusiones: `.git`, `node_modules`, `.repo-synapse`, `dist`, `build`, más lo que `git check-ignore` marque (consulta asíncrona para rutas nuevas).
-- Ventanas: `PreToolUse(Bash)` abre una ventana por `tool_use_id`; `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`, `Stop` y el siguiente `UserPromptSubmit` la cierran, con 600 ms de gracia para la latencia de FSEvents; TTL de 10 minutos.
-- Cambios de disco dentro de una ventana: evento `source: "watcher"` atribuido a esa sesión/agente. Fuera de toda ventana: `external: true`.
-- Dedupe: un cambio de disco sobre una ruta con Edit/Write en curso (o reportada por `bashEditDiff` en los últimos 2 s) no genera evento nuevo, pero sí actualiza el árbol.
-- Toda creación o borrado emite un mensaje `tree`, sea de Claude o externo.
+- In-memory index from the initial scan. Recursive `fs.watch`; per path, 40 ms coalescing and `lstat` to decide `add`/`addDir`/`change`/`unlink`/`unlinkDir`. An `unlink`+`add` pair within the same window is reported as `move`.
+- Exclusions: `.git`, `node_modules`, `.repo-synapse`, `dist`, `build`, plus whatever `git check-ignore` flags (asynchronous query for new paths).
+- Windows: `PreToolUse(Bash)` opens a window per `tool_use_id`; `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`, `Stop` and the next `UserPromptSubmit` close it, with 600 ms of grace for FSEvents latency; 10 minute TTL.
+- Disk changes inside a window: a `source: "watcher"` event attributed to that session/agent. Outside every window: `external: true`.
+- Dedupe: a disk change on a path with an Edit/Write in progress (or reported by `bashEditDiff` in the last 2 s) produces no new event, but it does update the tree.
+- Every creation or deletion emits a `tree` message, whether from Claude or external.
 
-## 8. Instalación de hooks
+## 8. Hook installation
 
-- Archivo: `<repo>/.claude/settings.local.json`. Eventos: `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionDenied`, `SubagentStart`, `SubagentStop`, `InstructionsLoaded`, `Stop`, `StopFailure`, `SessionEnd`, `PreCompact`, `PostCompact`. Sin `matcher`, `timeout: 2`.
-- Identidad propia: la URL exacta termina en `/hook?src=repo-synapse`. Install = quitar las entradas propias y agregar las nuevas (idempotente, corrige puertos viejos). Uninstall = quitar solo coincidencias exactas y limpiar arreglos y objetos que quedaron vacíos por nosotros.
-- Backup antes de la primera escritura (`.repo-synapse/settings.local.json.bak`) y manifiesto (`.repo-synapse/install.json`) con lo que se creó. Si al desinstalar el contenido coincide con el backup, se restauran los bytes originales; si el archivo no existía, se borra.
-- JSON inválido: se aborta, nunca se sobrescribe. Escritura atómica (temp + rename).
-- `.claude/settings.local.json` y `.repo-synapse/` se agregan a `.git/info/exclude` si git no los ignora ya.
-- `bashEditDiffEnabled`: solo si la fase 0 confirma que llega en el payload HTTP. `start` lo activa en `~/.claude/settings.json` (respetando `CLAUDE_CONFIG_DIR`) si no estaba, y lo revierte al salir. Varios visores lo comparten: se revierte cuando sale el último (ver I15 en `DECISIONS.md`).
-- `start` instala al arrancar y desinstala con SIGINT/SIGTERM/exit. Lockfile con PID para evitar dos procesos sobre el mismo repo.
+- File: `<repo>/.claude/settings.local.json`. Events: `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionDenied`, `SubagentStart`, `SubagentStop`, `InstructionsLoaded`, `Stop`, `StopFailure`, `SessionEnd`, `PreCompact`, `PostCompact`. No `matcher`, `timeout: 2`.
+- Own identity: the exact URL ends in `/hook?src=repo-synapse`. Install = remove our own entries and add the new ones (idempotent, fixes old ports). Uninstall = remove only exact matches and clean up arrays and objects we left empty.
+- Backup before the first write (`.repo-synapse/settings.local.json.bak`) and a manifest (`.repo-synapse/install.json`) with what was created. If on uninstall the content matches the backup, the original bytes are restored; if the file did not exist, it is deleted.
+- Invalid JSON: abort, never overwrite. Atomic write (temp + rename).
+- `.claude/settings.local.json` and `.repo-synapse/` are added to `.git/info/exclude` if git does not already ignore them.
+- `bashEditDiffEnabled`: only if phase 0 confirms it arrives in the HTTP payload. `start` turns it on in `~/.claude/settings.json` (honoring `CLAUDE_CONFIG_DIR`) if it was off, and reverts it on exit. Several viewers share it: it is reverted when the last one exits (see I15 in `DECISIONS.md`).
+- `start` installs on startup and uninstalls on SIGINT/SIGTERM/exit. Lockfile with the PID to keep two processes off the same repo.
 
 ## 9. Frontend
 
-- Nodos: raíz, carpetas, archivos; links padre -> hijo. Layout `d3` con `dagMode: "radialout"` y `dagLevelDistance` fijo, warmup y cooldown cortos.
-- Luz: por evento, cadena visible raíz -> ... -> destino; `emitParticle` por salto cada 80 ms; color, ancho y velocidad leídos del link en el momento de emitir.
-- Nodo destino: brillo y escala con decaimiento de 3,5 s. Fase `pre` = pulso tenue; `post` = pulso completo; `fail` = gris con parpadeo.
-- Colores: read `#22d3ee`, search `#3b82f6`, edit `#f59e0b`, create `#22c55e`, delete `#ef4444`, move `#f472b6`, context_load `#a855f7`, bash `#e2e8f0`, fail `#6b7280`, externos gris tenue.
-- Subagentes: tono de halo por `agent_id`.
-- Satélites: rutas fuera del repo agrupadas bajo un hub aparte (`~/.claude`, `/tmp`, otros).
-- Estructura: `tree` agrega nodos (aparecen junto al padre) o los quita con fade; actualizaciones de `graphData` agrupadas cada 150 ms.
-- Heatmap: contador por nodo; brillo residual proporcional a `count / max`.
-- Colapso: con más de 1.500 nodos visibles se colapsan carpetas por profundidad; una carpeta colapsada se expande sola al recibir actividad.
-- Panel: feed en vivo (hora, sesión, agente, acción, ruta), contadores por acción, filtros por sesión y agente, toggle de externos, toggle 3D/2D.
-- `window.__vizState` expone nodos, activos, creados, eliminados, fps y feed para las pruebas.
+- Nodes: root, folders, files; parent -> child links. `d3` layout with `dagMode: "radialout"` and a fixed `dagLevelDistance`, short warmup and cooldown.
+- Light: per event, the visible chain root -> ... -> target; `emitParticle` per hop every 80 ms; color, width and speed read from the link at emit time.
+- Target node: glow and scale with a 3.5 s decay. Phase `pre` = faint pulse; `post` = full pulse; `fail` = blinking gray.
+- Colors: read `#22d3ee`, search `#3b82f6`, edit `#f59e0b`, create `#22c55e`, delete `#ef4444`, move `#f472b6`, context_load `#a855f7`, bash `#e2e8f0`, fail `#6b7280`, external dim gray.
+- Subagents: halo hue per `agent_id`.
+- Satellites: paths outside the repo grouped under a separate hub (`~/.claude`, `/tmp`, others).
+- Structure: `tree` adds nodes (they appear next to their parent) or removes them with a fade; `graphData` updates batched every 150 ms.
+- Heatmap: a counter per node; residual glow proportional to `count / max`.
+- Collapse: with more than 1,500 visible nodes, folders collapse by depth; a collapsed folder expands on its own when it gets activity.
+- Panel: live feed (time, session, agent, action, path), counters per action, filters by session and agent, external toggle, 3D/2D toggle.
+- `window.__vizState` exposes nodes, active, created, deleted, fps and feed for the tests.
 
 ## 10. Replay
 
-`repo-synapse replay [repo]` sirve la misma página en modo replay: carga `events.jsonl`, reconstruye el árbol inicial y reproduce con play, pausa y velocidad 1x/2x/5x. La página en vivo también puede reproducir el log actual.
+`repo-synapse replay [repo]` serves the same page in replay mode: it loads `events.jsonl`, rebuilds the initial tree and plays it back with play, pause and 1x/2x/5x speed. The live page can also replay the current log.
 
-## 11. Pasos (un commit por paso)
+## 11. Steps (one commit per step)
 
-| # | Paso | Entregable verificable |
+| # | Step | Verifiable deliverable |
 |---|---|---|
-| 0 | Scaffold y docs | `package.json`, `tsconfig`, este plan, `DECISIONS.md` |
-| 1 | Fase 0: sonda de payloads | `scripts/probe/*`, `docs/PAYLOADS.md`, fixtures reales en `test/fixtures/payloads` |
-| 2 | Tipos compartidos y protocolo | `src/shared/types.ts` ajustado a los payloads reales |
-| 3 | Árbol y rutas | `tree.ts`, `paths.ts` + pruebas |
-| 4 | Normalizador y clasificador Bash | `normalize.ts`, `bash.ts` + una prueba por herramienta con fixtures |
-| 5 | Watcher y atribución | `watcher.ts`, `attribution.ts` + pruebas de ventanas y dedupe |
-| 6 | Servidor | `server.ts`, `eventlog.ts` + integración (POST -> WS + jsonl) |
-| 7 | Instalador | `install/settings.ts` + pruebas de merge/unmerge byte a byte |
-| 8 | CLI | `start`, `install`, `uninstall`, `replay`, `doctor`, puerto libre, lock |
-| 9 | Grafo base | escena 3D, bloom, luz por ruta, colores |
-| 10 | Grafo completo | árbol dinámico, satélites, subagentes, heatmap, colapso, panel, 2D |
-| 11 | Replay | modo replay y controles |
-| 12 | E2E y rendimiento | Playwright + medición con 2.000 archivos |
-| 13 | Demo y README | `make-demo-repo.sh`, `DEMO.md`, README, prueba de humo real |
+| 0 | Scaffold and docs | `package.json`, `tsconfig`, this plan, `DECISIONS.md` |
+| 1 | Phase 0: payload probe | `scripts/probe/*`, `docs/PAYLOADS.md`, real fixtures in `test/fixtures/payloads` |
+| 2 | Shared types and protocol | `src/shared/types.ts` adjusted to the real payloads |
+| 3 | Tree and paths | `tree.ts`, `paths.ts` + tests |
+| 4 | Normalizer and Bash classifier | `normalize.ts`, `bash.ts` + one test per tool with fixtures |
+| 5 | Watcher and attribution | `watcher.ts`, `attribution.ts` + window and dedupe tests |
+| 6 | Server | `server.ts`, `eventlog.ts` + integration (POST -> WS + jsonl) |
+| 7 | Installer | `install/settings.ts` + byte for byte merge/unmerge tests |
+| 8 | CLI | `start`, `install`, `uninstall`, `replay`, `doctor`, free port, lock |
+| 9 | Base graph | 3D scene, bloom, light along the path, colors |
+| 10 | Full graph | dynamic tree, satellites, subagents, heatmap, collapse, panel, 2D |
+| 11 | Replay | replay mode and controls |
+| 12 | E2E and performance | Playwright + measurement with 2,000 files |
+| 13 | Demo and README | `make-demo-repo.sh`, `DEMO.md`, README, real smoke test |
 
-## 12. Pruebas
+## 12. Tests
 
-- Unitarias: normalizador (fixtures reales por herramienta), creación vs edición, relativización, clasificador Bash, atribución dentro y fuera de ventana, dedupe, instalador (preserva hooks ajenos, uninstall restaura bytes).
-- Integración: servidor real en puerto aleatorio; POST de fixtures; se verifica respuesta `204` vacía, mensajes WS, `events.jsonl` sin contenido de archivos, y atribución de un `rm` real contra un borrado externo.
-- E2E: Playwright abre la página, inyecta una secuencia por `POST /hook` y comprueba feed y `window.__vizState`.
-- Rendimiento: repo sintético de 2.000 archivos, fps medido en `__vizState`.
-- Humo: sesión real `claude -p` sobre el repo de demo con el guion de `DEMO.md`.
-- Todo con `npm test`.
+- Unit: normalizer (real fixtures per tool), create vs edit, relativization, Bash classifier, attribution inside and outside a window, dedupe, installer (keeps other hooks, uninstall restores bytes).
+- Integration: real server on a random port; POST of fixtures; checks the empty `204` response, the WS messages, an `events.jsonl` with no file content, and the attribution of a real `rm` against an external delete.
+- E2E: Playwright opens the page, injects a sequence through `POST /hook` and checks the feed and `window.__vizState`.
+- Performance: synthetic repo with 2,000 files, fps measured in `__vizState`.
+- Smoke: real `claude -p` session on the demo repo with the `DEMO.md` script.
+- All of it with `npm test`.
 
-## 13. Criterios de aceptación y cómo se verifican
+## 13. Acceptance criteria and how they are verified
 
-| Criterio | Verificación |
+| Criterion | Verification |
 |---|---|
-| Latencia < 300 ms | Integración: `ts` de recepción vs mensaje WS; E2E: evento -> nodo activo |
-| Servidor apagado sin errores visibles | Los hooks se quitan al salir; prueba de uninstall + `doctor` |
-| Sin contenido de archivos en navegador ni en jsonl | Integración con payloads que traen `content`, `old_string`, `new_string` y búsqueda de esos strings |
-| 7 acciones + fallos + subagentes distinguibles | Colores y halos; E2E revisa `__vizState` |
-| `rm` de Claude = `delete` atribuido; `rm` externo no | Integración con ventana Bash abierta vs cerrada |
-| install preserva, uninstall restaura | Unitarias byte a byte |
-| 2.000 archivos a 30 fps | Medición con navegador con GPU, registrada en `DECISIONS.md` |
-| `npm test` pasa | CI local |
+| Latency < 300 ms | Integration: receive `ts` vs WS message; E2E: event -> active node |
+| Server down with no visible errors | Hooks are removed on exit; uninstall test + `doctor` |
+| No file content in the browser or in the jsonl | Integration with payloads that carry `content`, `old_string`, `new_string` and a search for those strings |
+| 7 actions + failures + subagents distinguishable | Colors and halos; E2E checks `__vizState` |
+| Claude's `rm` = attributed `delete`; external `rm` is not | Integration with a Bash window open vs closed |
+| install keeps, uninstall restores | Byte for byte unit tests |
+| 2,000 files at 30 fps | Measured in a browser with a GPU, recorded in `DECISIONS.md` |
+| `npm test` passes | Local CI (since 0.3 also GitHub Actions, `.github/workflows/ci.yml`) |

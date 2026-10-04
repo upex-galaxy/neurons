@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Neurons guide</title>
+  <meta name="description" content="How to install and use Neurons, the live view of what Claude Code does in a repository.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='5' fill='%23eb6c36'/%3E%3Ccircle cx='6' cy='8' r='2.5' fill='%232d3142'/%3E%3Ccircle cx='26' cy='9' r='2.5' fill='%232d3142'/%3E%3Ccircle cx='24' cy='25' r='2.5' fill='%232d3142'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <!--
+    User guide served by the viewer at GET /help (copied to dist/docs by scripts/build-docs.mjs).
+    Every visible string lives in docs/i18n/guide.{en,es}.json and is applied through
+    data-i18n (text), data-i18n-html (trusted markup from those files) and data-i18n-attr.
+    The dictionaries are also embedded below so the page works from file://, where fetch is
+    blocked; run `node scripts/sync-guide-i18n.mjs` after editing them (a unit test checks it).
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --color-paper:       #f5f5f5;
+      --color-paper-2:     #ececec;
+      --color-ink:         #2d3142;
+      --color-muted:       #4f5d75;
+      --color-soft:        #7a8399;
+      --color-rule:        rgba(45,49,66,0.12);
+      --color-rule-solid:  rgba(79,93,117,0.25);
+      --color-accent:      #eb6c36;
+      --color-accent-tint: rgba(235,108,54,0.08);
+      --color-link:        #2e5aa8;
+      --font-sans:   'Geist', system-ui, sans-serif;
+      --font-serif:  'Instrument Serif', 'Times New Roman', serif;
+      --font-mono:   'Geist Mono', ui-monospace, Menlo, monospace;
+      --bar-h: 56px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: calc(var(--bar-h) + 16px); }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      line-height: 1.6;
+      -webkit-text-size-adjust: 100%;
+    }
+    a { color: var(--color-link); text-underline-offset: 2px; }
+    a:hover { color: var(--color-accent); }
+    :focus-visible { outline: 3px solid var(--color-accent); outline-offset: 2px; }
+    code {
+      font-family: var(--font-mono);
+      font-size: 0.85em;
+      background: rgba(45,49,66,0.06);
+      border-radius: 4px;
+      padding: 0.05em 0.35em;
+      overflow-wrap: anywhere;
+    }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+    .skip {
+      position: absolute; left: 16px; top: -48px; z-index: 20;
+      background: var(--color-ink); color: var(--color-paper);
+      padding: 8px 12px; border-radius: 4px; font: 500 0.8rem/1 var(--font-sans);
+    }
+    .skip:focus { top: 8px; color: var(--color-paper); }
+
+    /* Top bar */
+    .bar {
+      position: sticky; top: 0; z-index: 10;
+      height: var(--bar-h);
+      background: var(--color-paper);
+      border-bottom: 1px solid var(--color-rule);
+    }
+    .bar-inner {
+      max-width: 1072px; height: 100%; margin: 0 auto; padding: 0 16px;
+      display: flex; align-items: center; gap: 1.5rem;
+    }
+    .brand {
+      display: flex; align-items: center; gap: 0.55rem;
+      font-family: var(--font-serif); font-size: 1.45rem; line-height: 1;
+      color: var(--color-ink); text-decoration: none;
+    }
+    .brand svg { width: 22px; height: 22px; flex: none; }
+    .nav { display: flex; gap: 1.25rem; margin-left: auto; font: 500 0.72rem/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; }
+    .nav a { color: var(--color-muted); text-decoration: none; padding: 6px 0; }
+    .nav a:hover { color: var(--color-accent); }
+    .lang { display: flex; border: 1px solid var(--color-rule-solid); border-radius: 4px; overflow: hidden; flex: none; }
+    .lang button {
+      min-width: 40px; min-height: 32px; padding: 0 10px;
+      border: 0; background: transparent; color: var(--color-muted);
+      font: 600 0.72rem/1 var(--font-mono); letter-spacing: 0.06em; cursor: pointer;
+    }
+    .lang button + button { border-left: 1px solid var(--color-rule-solid); }
+    .lang button[aria-pressed="true"] { background: var(--color-ink); color: var(--color-paper); }
+    .lang button:focus-visible { outline-offset: -3px; }
+
+    /* Layout */
+    main { padding: 0 16px 5rem; }
+    .wrap { max-width: 1040px; margin: 0 auto; }
+    .col { max-width: 720px; }
+    section.chapter { margin-top: 5rem; }
+    .eyebrow {
+      font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500;
+      letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted);
+      margin-bottom: 0.75rem;
+    }
+    h1 {
+      font-family: var(--font-serif); font-weight: 400;
+      font-size: clamp(2.2rem, 4vw + 1rem, 3.6rem);
+      letter-spacing: -0.02em; line-height: 1.05; margin-bottom: 1.25rem;
+    }
+    h2 {
+      font-family: var(--font-serif); font-weight: 400;
+      font-size: clamp(1.7rem, 1.6vw + 1rem, 2.3rem);
+      letter-spacing: -0.01em; line-height: 1.15; margin-bottom: 0.75rem;
+    }
+    h3 {
+      font-family: var(--font-serif); font-weight: 400;
+      font-size: 1.45rem; line-height: 1.2; letter-spacing: -0.005em;
+    }
+    p { max-width: 68ch; }
+    p + p { margin-top: 0.75rem; }
+    .lead { font-size: 1.08rem; color: var(--color-muted); }
+    .lead + .lead { margin-top: 0.9rem; }
+    .note { font-size: 0.88rem; color: var(--color-muted); margin-top: 1rem; }
+    .req {
+      margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--color-rule);
+      font: 500 0.78rem/1.5 var(--font-mono); color: var(--color-muted);
+    }
+
+    /* Hero */
+    .hero { padding-top: 4rem; }
+    .hero figure { margin-top: 2.5rem; }
+    .hero img {
+      display: block; width: 100%; height: auto; aspect-ratio: 16 / 10;
+      border: 1px solid var(--color-rule-solid); border-radius: 6px; background: #05060a;
+    }
+    figcaption { margin-top: 0.75rem; font-size: 0.82rem; line-height: 1.5; color: var(--color-muted); max-width: 80ch; }
+
+    /* Code blocks and copy buttons */
+    .code { position: relative; margin-top: 1rem; }
+    pre {
+      background: var(--color-paper-2);
+      border: 1px solid var(--color-rule);
+      border-radius: 6px;
+      padding: 0.9rem 1rem;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      font: 400 0.8rem/1.6 var(--font-mono);
+      color: var(--color-ink);
+      tab-size: 2;
+    }
+    pre code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
+    .code pre { padding-right: 5.5rem; }
+    .code.prompt pre, pre.wrap { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 26rem; overflow-y: auto; }
+    .copy-btn {
+      position: absolute; top: 8px; right: 8px;
+      min-height: 30px; padding: 0 10px;
+      border: 1px solid var(--color-rule-solid); border-radius: 4px;
+      background: var(--color-paper); color: var(--color-ink);
+      font: 600 0.68rem/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase;
+      cursor: pointer;
+    }
+    .copy-btn:hover { border-color: var(--color-accent); color: var(--color-accent); }
+    .copy-btn.done { border-color: var(--color-accent); color: var(--color-accent); }
+
+    /* Steps */
+    ol.steps { list-style: none; counter-reset: step; margin-top: 2rem; }
+    ol.steps > li {
+      counter-increment: step;
+      display: grid; grid-template-columns: 2.75rem minmax(0, 1fr); gap: 0 0.75rem;
+      padding: 1.5rem 0; border-top: 1px solid var(--color-rule);
+    }
+    ol.steps > li::before {
+      content: counter(step);
+      font-family: var(--font-serif); font-size: 2.1rem; line-height: 1; color: var(--color-accent);
+    }
+    ol.steps > li > div { min-width: 0; }
+    ol.steps h3 { font-size: 1.3rem; margin-bottom: 0.4rem; }
+    .two-up { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+
+    /* FAQ */
+    .faq-tools { margin-top: 2rem; max-width: 720px; }
+    .faq-tools label { display: block; }
+    .search {
+      position: relative; margin-top: 0.4rem;
+    }
+    .search svg { position: absolute; left: 12px; top: 50%; width: 16px; height: 16px; transform: translateY(-50%); color: var(--color-soft); pointer-events: none; }
+    .search input {
+      width: 100%; min-height: 44px; padding: 0 12px 0 38px;
+      border: 1px solid var(--color-rule-solid); border-radius: 6px;
+      background: #fff; color: var(--color-ink);
+      font: 400 1rem/1.2 var(--font-sans);
+    }
+    .search input::placeholder { color: var(--color-soft); }
+    .search input:focus-visible { outline: 3px solid var(--color-accent); outline-offset: 1px; border-color: transparent; }
+    .faq-empty { margin-top: 1.5rem; color: var(--color-muted); font-style: italic; font-family: var(--font-serif); font-size: 1.2rem; }
+    .faq-group { margin-top: 3rem; max-width: 760px; }
+    .faq-group > h3 { margin-bottom: 0.5rem; }
+    details.faq { border-top: 1px solid var(--color-rule); scroll-margin-top: calc(var(--bar-h) + 16px); }
+    .faq-group details.faq:last-of-type { border-bottom: 1px solid var(--color-rule); }
+    details.faq > summary {
+      list-style: none; cursor: pointer;
+      display: flex; align-items: baseline; gap: 1rem;
+      padding: 0.95rem 0; font-weight: 500; font-size: 1.02rem; line-height: 1.4;
+    }
+    details.faq > summary::-webkit-details-marker { display: none; }
+    details.faq > summary::after {
+      content: "+"; margin-left: auto; flex: none;
+      font: 400 1.3rem/1 var(--font-mono); color: var(--color-soft);
+      transition: transform 160ms cubic-bezier(.2,.8,.2,1);
+    }
+    details.faq[open] > summary::after { content: "\2212"; color: var(--color-accent); }
+    details.faq > summary:hover { color: var(--color-accent); }
+    details.faq > summary:focus-visible { outline-offset: 0; }
+    .answer { padding: 0 0 1.4rem; max-width: 68ch; }
+    .answer ul, .answer ol { margin: 0.75rem 0 0 1.25rem; }
+    .answer li + li { margin-top: 0.35rem; }
+    .answer li::marker { color: var(--color-soft); }
+    .answer .code { margin-top: 0.75rem; }
+    .answer .code + p, .answer .table-wrap + p { margin-top: 0.75rem; }
+    .faq-link {
+      display: inline-block; margin-top: 0.9rem;
+      font: 500 0.68rem/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--color-soft); text-decoration: none;
+    }
+    .faq-link:hover { color: var(--color-accent); }
+
+    /* Tables */
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 0.9rem; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.88rem; line-height: 1.45; }
+    th {
+      text-align: left; font: 500 0.66rem/1.3 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--color-muted); padding: 0.5rem 0.75rem 0.5rem 0; border-bottom: 1px solid var(--color-rule-solid);
+    }
+    td { padding: 0.55rem 0.75rem 0.55rem 0; border-bottom: 1px solid var(--color-rule); vertical-align: top; }
+    td:first-child { white-space: nowrap; }
+    table.colors td:last-child { min-width: 14rem; }
+    .sw {
+      display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 50%;
+      margin-right: 0.5rem; vertical-align: -0.08rem; background: var(--c);
+      border: 1px solid rgba(45,49,66,0.25);
+    }
+    .sw-read { --c: #22d3ee; } .sw-search { --c: #3b82f6; } .sw-edit { --c: #f59e0b; }
+    .sw-create { --c: #22c55e; } .sw-delete { --c: #ef4444; } .sw-move { --c: #f472b6; }
+    .sw-context { --c: #a855f7; } .sw-bash { --c: #e2e8f0; } .sw-skill { --c: #fb923c; }
+    .sw-mcp { --c: #2dd4bf; } .sw-tool { --c: #94a3b8; } .sw-subagent { --c: #fde047; }
+    .sw-fail { --c: #6b7280; } .sw-external { --c: #475569; }
+    .status {
+      display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; white-space: nowrap;
+      font: 600 0.66rem/1.4 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase;
+    }
+    .status-ok { background: var(--color-ink); color: var(--color-paper); }
+    .status-mid { border: 1px solid var(--color-ink); color: var(--color-ink); }
+    .status-low { border: 1px dashed var(--color-soft); color: var(--color-muted); }
+
+    footer { padding: 0 16px 3rem; }
+    .foot {
+      max-width: 1040px; margin: 0 auto; padding-top: 1.5rem;
+      border-top: 1px solid var(--color-rule);
+      display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem;
+      font: 500 0.72rem/1.5 var(--font-mono); color: var(--color-muted);
+    }
+    footer a { color: var(--color-muted); }
+    noscript p { margin-top: 1rem; font: 500 0.8rem/1.4 var(--font-mono); color: var(--color-muted); }
+
+    @media (min-width: 900px) {
+      .two-up { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 3rem; }
+    }
+    @media (max-width: 640px) {
+      .nav { display: none; }
+      .lang { margin-left: auto; }
+      .hero { padding-top: 2.5rem; }
+      section.chapter { margin-top: 3.5rem; }
+      ol.steps > li { grid-template-columns: 2rem minmax(0, 1fr); }
+      ol.steps > li::before { font-size: 1.7rem; }
+      td:first-child { white-space: normal; }
+      table.colors td:first-child { white-space: nowrap; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#content" data-i18n="a11y.skip"></a>
+
+  <header class="bar">
+    <div class="bar-inner">
+      <a class="brand" href="#top" aria-label="Neurons">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><line x1="16" y1="16" x2="6" y2="8" stroke="#2d3142" stroke-opacity=".35"/><line x1="16" y1="16" x2="26" y2="9" stroke="#2d3142" stroke-opacity=".35"/><line x1="16" y1="16" x2="24" y2="25" stroke="#2d3142" stroke-opacity=".35"/><circle cx="16" cy="16" r="5" fill="#eb6c36"/><circle cx="6" cy="8" r="2.5" fill="#2d3142"/><circle cx="26" cy="9" r="2.5" fill="#2d3142"/><circle cx="24" cy="25" r="2.5" fill="#2d3142"/></svg>
+        Neurons
+      </a>
+      <nav class="nav" data-i18n-attr="aria-label:nav.aria">
+        <a href="#setup-ai" data-i18n="nav.setup"></a>
+        <a href="#use" data-i18n="nav.use"></a>
+        <a href="#faq" data-i18n="nav.faq"></a>
+        <a class="arch-link" href="architecture.html" data-i18n="nav.architecture"></a>
+      </nav>
+      <div class="lang" role="group" data-i18n-attr="aria-label:lang.label">
+        <button type="button" data-lang="en" aria-pressed="false" data-i18n-attr="title:lang.enTitle">EN</button>
+        <button type="button" data-lang="es" aria-pressed="false" data-i18n-attr="title:lang.esTitle">ES</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="content">
+    <div class="wrap">
+      <section class="hero" id="top">
+        <div class="col">
+          <p class="eyebrow" data-i18n="hero.eyebrow"></p>
+          <h1 data-i18n="hero.title"></h1>
+          <p class="lead" data-i18n-html="hero.lead"></p>
+          <p class="lead" data-i18n="hero.lead2"></p>
+          <p class="req" data-i18n="hero.req"></p>
+          <noscript><p>This page needs JavaScript to show its text and switch languages. / Esta página necesita JavaScript para mostrar el texto y cambiar de idioma.</p></noscript>
+        </div>
+        <figure>
+          <img src="img/live.png" width="1600" height="1000" data-i18n-attr="alt:hero.imgAlt" alt="">
+          <figcaption data-i18n="hero.caption"></figcaption>
+        </figure>
+      </section>
+
+      <section class="chapter" id="setup-ai">
+        <div class="col">
+          <h2 data-i18n="ai.title"></h2>
+          <p data-i18n-html="ai.lead"></p>
+          <div class="code prompt"><pre><code data-i18n="ai.prompt"></code></pre></div>
+          <p class="note" data-i18n-html="ai.note"></p>
+        </div>
+      </section>
+
+      <section class="chapter" id="setup-manual">
+        <div class="col">
+          <h2 data-i18n="manual.title"></h2>
+          <p class="lead" data-i18n="manual.lead"></p>
+          <ol class="steps">
+            <li><div>
+              <h3 data-i18n="manual.s1.title"></h3>
+              <div class="code"><pre><code>git clone &lt;repo-url&gt; ~/neurons
+cd ~/neurons
+npm install
+npm run build</code></pre></div>
+              <p class="note" data-i18n-html="manual.s1.body"></p>
+            </div></li>
+            <li><div>
+              <h3 data-i18n="manual.s2.title"></h3>
+              <div class="code"><pre><code>npm link</code></pre></div>
+              <p class="note" data-i18n-html="manual.s2.body"></p>
+            </div></li>
+            <li><div>
+              <h3 data-i18n="manual.s3.title"></h3>
+              <div class="code"><pre><code>neu --version
+neu doctor</code></pre></div>
+              <p class="note" data-i18n-html="manual.s3.body"></p>
+            </div></li>
+            <li><div>
+              <h3 data-i18n="manual.s4.title"></h3>
+              <p class="note" data-i18n-html="manual.s4.body"></p>
+              <div class="two-up">
+                <div class="code"><pre><code>"bin": {
+  "nr": "./dist/cli.mjs"
+}</code></pre></div>
+                <div class="code"><pre><code>npm unlink -g neurons-cli
+npm link</code></pre></div>
+              </div>
+            </div></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="chapter" id="use">
+        <div class="col">
+          <h2 data-i18n="use.title"></h2>
+          <ol class="steps">
+            <li><div>
+              <h3 data-i18n="use.s1.title"></h3>
+              <div class="code"><pre><code data-i18n="use.s1.code"></code></pre></div>
+              <p class="note" data-i18n-html="use.s1.body"></p>
+            </div></li>
+            <li><div>
+              <h3 data-i18n="use.s2.title"></h3>
+              <div class="code"><pre><code data-i18n="use.s2.code"></code></pre></div>
+              <p class="note" data-i18n-html="use.s2.body"></p>
+            </div></li>
+            <li><div>
+              <h3 data-i18n="use.s3.title"></h3>
+              <div class="code"><pre><code>neu stop</code></pre></div>
+              <p class="note" data-i18n-html="use.s3.body"></p>
+            </div></li>
+          </ol>
+          <p class="note" data-i18n-html="use.more"></p>
+        </div>
+      </section>
+
+      <section class="chapter" id="faq">
+        <div class="col">
+          <h2 data-i18n="faq.title"></h2>
+          <p class="lead" data-i18n="faq.lead"></p>
+        </div>
+        <div class="faq-tools">
+          <label class="eyebrow" for="faq-search" data-i18n="faq.searchLabel"></label>
+          <div class="search">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="7" cy="7" r="4.75"/><line x1="10.5" y1="10.5" x2="14" y2="14" stroke-linecap="round"/></svg>
+            <input id="faq-search" type="search" autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:faq.searchPlaceholder">
+          </div>
+          <p class="faq-empty" id="faq-empty" role="status" hidden data-i18n="faq.empty"></p>
+        </div>
+
+        <div class="faq-group">
+          <h3 data-i18n="faq.group.start"></h3>
+          <details class="faq" id="faq-what"><summary data-i18n="faq.what.q"></summary><div class="answer" data-i18n-html="faq.what.a"></div></details>
+          <details class="faq" id="faq-cli"><summary data-i18n="faq.cli.q"></summary><div class="answer" data-i18n-html="faq.cli.a"></div></details>
+          <details class="faq" id="faq-install"><summary data-i18n="faq.install.q"></summary><div class="answer" data-i18n-html="faq.install.a"></div></details>
+          <details class="faq" id="faq-other-repo"><summary data-i18n="faq.other-repo.q"></summary><div class="answer" data-i18n-html="faq.other-repo.a"></div></details>
+        </div>
+
+        <div class="faq-group">
+          <h3 data-i18n="faq.group.see"></h3>
+          <details class="faq" id="faq-nodes"><summary data-i18n="faq.nodes.q"></summary><div class="answer" data-i18n-html="faq.nodes.a"></div></details>
+          <details class="faq" id="faq-colors"><summary data-i18n="faq.colors.q"></summary><div class="answer" data-i18n-html="faq.colors.a"></div></details>
+          <details class="faq" id="faq-disconnected"><summary data-i18n="faq.disconnected.q"></summary><div class="answer" data-i18n-html="faq.disconnected.a"></div></details>
+          <details class="faq" id="faq-subagents"><summary data-i18n="faq.subagents.q"></summary><div class="answer" data-i18n-html="faq.subagents.a"></div></details>
+        </div>
+
+        <div class="faq-group">
+          <h3 data-i18n="faq.group.daily"></h3>
+          <details class="faq" id="faq-restart"><summary data-i18n="faq.restart.q"></summary><div class="answer" data-i18n-html="faq.restart.a"></div></details>
+          <details class="faq" id="faq-several-sessions"><summary data-i18n="faq.several-sessions.q"></summary><div class="answer" data-i18n-html="faq.several-sessions.a"></div></details>
+          <details class="faq" id="faq-several-repos"><summary data-i18n="faq.several-repos.q"></summary><div class="answer" data-i18n-html="faq.several-repos.a"></div></details>
+          <details class="faq" id="faq-replay"><summary data-i18n="faq.replay.q"></summary><div class="answer" data-i18n-html="faq.replay.a"></div></details>
+          <details class="faq" id="faq-timeline"><summary data-i18n="faq.timeline.q"></summary><div class="answer" data-i18n-html="faq.timeline.a"></div></details>
+          <details class="faq" id="faq-detail"><summary data-i18n="faq.detail.q"></summary><div class="answer" data-i18n-html="faq.detail.a"></div></details>
+          <details class="faq" id="faq-tools"><summary data-i18n="faq.tools.q"></summary><div class="answer" data-i18n-html="faq.tools.a"></div></details>
+        </div>
+
+        <div class="faq-group">
+          <h3 data-i18n="faq.group.safety"></h3>
+          <details class="faq" id="faq-touches"><summary data-i18n="faq.touches.q"></summary><div class="answer" data-i18n-html="faq.touches.a"></div></details>
+          <details class="faq" id="faq-crash"><summary data-i18n="faq.crash.q"></summary><div class="answer" data-i18n-html="faq.crash.a"></div></details>
+          <details class="faq" id="faq-content"><summary data-i18n="faq.content.q"></summary><div class="answer" data-i18n-html="faq.content.a"></div></details>
+        </div>
+
+        <div class="faq-group">
+          <h3 data-i18n="faq.group.demo"></h3>
+          <details class="faq" id="faq-demo"><summary data-i18n="faq.demo.q"></summary><div class="answer" data-i18n-html="faq.demo.a"></div></details>
+          <details class="faq" id="faq-demo-small"><summary data-i18n="faq.demo-small.q"></summary><div class="answer" data-i18n-html="faq.demo-small.a"></div></details>
+        </div>
+
+        <div class="faq-group">
+          <h3 data-i18n="faq.group.how"></h3>
+          <details class="faq" id="faq-how"><summary data-i18n="faq.how.q"></summary><div class="answer" data-i18n-html="faq.how.a"></div></details>
+          <details class="faq" id="faq-os"><summary data-i18n="faq.os.q"></summary><div class="answer" data-i18n-html="faq.os.a"></div></details>
+          <details class="faq" id="faq-lang"><summary data-i18n="faq.lang.q"></summary><div class="answer" data-i18n-html="faq.lang.a"></div></details>
+        </div>
+
+        <div class="faq-group">
+          <h3 data-i18n="faq.group.later"></h3>
+          <details class="faq" id="faq-publish"><summary data-i18n="faq.publish.q"></summary><div class="answer" data-i18n-html="faq.publish.a"></div></details>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <div class="foot">
+      <span data-i18n="footer.text"></span>
+      <a class="arch-link" href="architecture.html" data-i18n="footer.arch"></a>
+    </div>
+  </footer>
+
+  <!-- i18n:embedded:start (generated by scripts/sync-guide-i18n.mjs from docs/i18n/guide.*.json; do not edit by hand) -->
+  <script type="application/json" id="guide-i18n">{"en":{"meta.title":"Neurons guide","meta.description":"How to install and use Neurons, the live view of what Claude Code does in a repository, with answers to common questions.","a11y.skip":"Skip to content","nav.aria":"Sections","nav.setup":"Set up","nav.use":"Use","nav.faq":"Questions","nav.architecture":"Architecture","lang.label":"Language","lang.enTitle":"English","lang.esTitle":"Español","copy.button":"Copy","copy.done":"Copied","copy.failed":"Select and copy","copy.aria":"Copy to the clipboard","hero.eyebrow":"Neurons · user guide","hero.title":"See what Claude Code does in your repo, while it does it","hero.lead":"Neurons is a command, \u003ccode>neu\u003c/code>, that opens a page in your browser with your repository drawn as a network. Every file and folder is a node. When Claude Code reads, searches, edits, creates or deletes something, a light travels to that file in the color of the action.","hero.lead2":"Use it to watch how the agent works: what it reads first, how much it explores before it edits, which instructions load on their own and what its subagents get up to. It runs on your machine and only looks at paths, never at what your files contain.","hero.imgAlt":"Neurons showing its own repository as a glowing network, with reads in cyan, an edit in amber and the activity panel on the right","hero.caption":"The viewer on Neurons' own repository. Cyan lines are reads, amber is an edit, the repo sits in the center and files outside it (your ~/.claude) form their own cluster on the left. The floating stream at the bottom left says what Claude is doing now; the panel on the right has the counters, the tools used and every action.","hero.req":"You need Node 22.12 or later, git and Claude Code. Tested with Claude Code 2.1.285 and 2.1.288 on macOS.","ai.title":"Set it up with your AI","ai.lead":"Open Claude Code in any folder and paste this prompt. First replace \u003ccode>&lt;repo-url&gt;\u003c/code> with the address you got Neurons from, either a Git URL or a folder on your disk. Claude clones it into \u003ccode>~/neurons\u003c/code>, builds it, links the \u003ccode>neu\u003c/code> command and checks that it runs.","ai.prompt":"Install the Neurons CLI (npm package neurons-cli) on this machine. Do these steps in order and stop to tell me if one fails.\n\n1. Run `node --version`. Neurons needs Node 22.12 or later. If mine is older, stop and tell me how to update it; do not change my Node install yourself.\n2. Clone the repository: `git clone \u003crepo-url> ~/neurons`. If \u003crepo-url> is still a placeholder, ask me for it. If ~/neurons already exists, ask me before touching it.\n3. In ~/neurons run `npm install` and then `npm run build`. The build must leave a file at ~/neurons/dist/cli.mjs.\n4. In ~/neurons run `npm link`. It puts two global commands on my PATH, `neu` and `neurons`, which are the same program. If it fails with EEXIST because another package already owns `neu`, tell me which package it is and do not use --force without asking. If it fails with EACCES, explain my options instead of using sudo.\n5. Check the install: `neu --version` must print a version, and `neu doctor` must run. Show me what doctor reports. A note that the hooks are not installed is expected at this point.\n6. Tell me in two lines how to use it: cd into any repository and run `neu`, then open Claude Code in that same repository.\n\nIf I want the command to have another name, the names come from the \"bin\" field in ~/neurons/package.json. Changing a key there (for example \"neu\" to \"nr\") and running `npm unlink -g neurons-cli` and then `npm link` again does it. Ask me whether I want that before you change anything.","ai.note":"The prompt makes Claude stop and ask before it touches an existing \u003ccode>~/neurons\u003c/code> folder or forces the link over another package's \u003ccode>neu\u003c/code>.","manual.title":"Set it up by hand","manual.lead":"The same steps, typed yourself.","manual.s1.title":"Clone and build","manual.s1.body":"\u003ccode>npm run build\u003c/code> builds the web page, the CLI and this guide into \u003ccode>dist/\u003c/code>.","manual.s2.title":"Link the command","manual.s2.body":"This puts \u003ccode>neu\u003c/code> and \u003ccode>neurons\u003c/code> on your PATH (they are the same program), pointing at \u003ccode>~/neurons/dist/cli.mjs\u003c/code>. To remove them later, run \u003ccode>npm unlink -g neurons-cli\u003c/code>. If \u003ccode>npm link\u003c/code> fails with \u003ccode>EACCES\u003c/code>, your global npm folder belongs to root; a Node version manager such as nvm or fnm avoids that without sudo.","manual.s3.title":"Check it","manual.s3.body":"\u003ccode>neu --version\u003c/code> prints the version. \u003ccode>neu doctor\u003c/code> checks Node, the hooks, the Claude Code settings files and whether the page is built.","manual.s4.title":"Pick another name (optional)","manual.s4.body":"The command names come from \u003ccode>\"bin\"\u003c/code> in \u003ccode>~/neurons/package.json\u003c/code>. Change a key, for example \u003ccode>neu\u003c/code> to \u003ccode>nr\u003c/code>, then unlink and link again. The help text and the messages keep saying \u003ccode>neu\u003c/code>.","use.title":"Use it","use.s1.title":"Start the viewer in your repo","use.s1.body":"The browser opens at \u003ccode>http://127.0.0.1:7777\u003c/code> (or the next free port). From a subfolder, \u003ccode>neu\u003c/code> moves up to the root of the git repository and tells you. You can also pass the folder: \u003ccode>neu ~/projects/api\u003c/code>.","use.s1.code":"cd ~/projects/my-repo\nneu","use.s2.title":"Open Claude Code in that repo","use.s2.body":"In another terminal, the way you always do. A session that was already open picks up the hooks without a restart. The network lights up with every action.","use.s2.code":"cd ~/projects/my-repo\nclaude","use.s3.title":"Close it","use.s3.body":"Press \u003ccode>Ctrl+C\u003c/code> in the terminal where \u003ccode>neu\u003c/code> runs, or run \u003ccode>neu stop\u003c/code> from any other one. The hooks come out and your settings go back to how they were, byte for byte.","use.more":"While the viewer runs, this guide is also at \u003ccode>/help\u003c/code> and the architecture page at \u003ccode>/architecture\u003c/code> on the same address. \u003ccode>neu help\u003c/code> lists every command and option.","faq.title":"Questions","faq.lead":"Grouped by theme. Each question has its own link, so you can send someone straight to an answer.","faq.searchLabel":"Search the questions","faq.searchPlaceholder":"Search: replay, colors, Windows…","faq.empty":"No question matches that search.","faq.link":"Link to this answer","faq.group.start":"Getting started","faq.group.see":"What I see","faq.group.daily":"Daily use","faq.group.safety":"Safety and privacy","faq.group.demo":"Demo","faq.group.how":"Under the hood","faq.group.later":"Later: publishing","faq.what.q":"What is Neurons?","faq.what.a":"\u003cp>A live map of what Claude Code does inside one repository. Your repo becomes a network of files and folders, and each action the agent takes (a read, a search, an edit, a new file, a deletion, a command) shows up as a light on the file it touched. A side panel lists the same actions with their details, and a timeline shows them in order.\u003c/p>\u003cp>It is meant for watching and learning: how the agent explores a codebase, how many files it reads before changing one, which \u003ccode>CLAUDE.md\u003c/code> files and rules it loads, and what its subagents do.\u003c/p>","faq.cli.q":"Is it a CLI?","faq.cli.a":"\u003cp>Yes. You run \u003ccode>neu\u003c/code> in a terminal. It starts a small server on \u003ccode>127.0.0.1\u003c/code>, tells Claude Code to send its events there while it runs, and opens the page in your browser. There is no account and no cloud service, and nothing leaves your machine.\u003c/p>\u003cp>\u003ccode>neurons\u003c/code> is the same command with a longer name.\u003c/p>","faq.install.q":"How do I install it?","faq.install.a":"\u003cp>Neurons is not on npm yet, so you install it from its repository: clone, \u003ccode>npm install\u003c/code>, \u003ccode>npm run build\u003c/code> and \u003ccode>npm link\u003c/code>. You can \u003ca href=\"#setup-ai\">let Claude do it with a prompt\u003c/a> or \u003ca href=\"#setup-manual\">type the steps yourself\u003c/a>. You need Node 22.12 or later.\u003c/p>","faq.other-repo.q":"How do I use it in another repo?","faq.other-repo.a":"\u003cp>Go to that repo and run \u003ccode>neu\u003c/code>, or pass the path from anywhere: \u003ccode>neu ~/projects/api\u003c/code>. Nothing needs installing per repo. \u003ccode>neu\u003c/code> writes its hooks into that repo when it starts and takes them out when it closes.\u003c/p>\u003cp>Each repo gets its own viewer on its own port, so you can watch several at once. See \u003ca href=\"#faq-several-repos\">several repos\u003c/a>.\u003c/p>","faq.nodes.q":"What are the nodes and the lines?","faq.nodes.a":"\u003cp>Every file and every folder is a node. The lines join each item to the folder it lives in, so the network is your folder tree, with the repository root as the big node in the middle. When something happens, the light travels from the root down those lines to the file.\u003c/p>\u003cp>Files outside the repo that Claude touches, such as your skills in \u003ccode>~/.claude\u003c/code> or something in \u003ccode>/tmp\u003c/code>, gather in a separate cluster. The files touched most keep a soft glow, like a heat map. In repos with more than 1,500 nodes, folders start collapsed and open on their own when Claude goes into them; you can also click a collapsed folder to open it.\u003c/p>","faq.colors.q":"What does each color mean?","faq.colors.a":"\u003cp>The color is the kind of action. A faint pulse means Claude decided to use a tool; the full pulse means the tool finished.\u003c/p>\u003cdiv class=\"table-wrap\">\u003ctable class=\"colors\">\u003cthead>\u003ctr>\u003cth>Color\u003c/th>\u003cth>Action\u003c/th>\u003cth>What triggers it\u003c/th>\u003c/tr>\u003c/thead>\u003ctbody>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-read\">\u003c/span>cyan\u003c/td>\u003ctd>read\u003c/td>\u003ctd>Claude reads a file\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-search\">\u003c/span>blue\u003c/td>\u003ctd>search\u003c/td>\u003ctd>\u003ccode>grep\u003c/code>, \u003ccode>rg\u003c/code>, \u003ccode>find\u003c/code>, Glob or Grep; the files found flash faintly\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-edit\">\u003c/span>amber\u003c/td>\u003ctd>edit\u003c/td>\u003ctd>a change to an existing file\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-create\">\u003c/span>green\u003c/td>\u003ctd>create\u003c/td>\u003ctd>a new file or folder\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-delete\">\u003c/span>red\u003c/td>\u003ctd>delete\u003c/td>\u003ctd>a file or folder removed\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-move\">\u003c/span>pink\u003c/td>\u003ctd>move\u003c/td>\u003ctd>\u003ccode>mv\u003c/code> or \u003ccode>git mv\u003c/code>\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-context\">\u003c/span>violet\u003c/td>\u003ctd>context\u003c/td>\u003ctd>instructions that load on their own: \u003ccode>CLAUDE.md\u003c/code>, \u003ccode>.claude/rules\u003c/code>\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-bash\">\u003c/span>white\u003c/td>\u003ctd>command\u003c/td>\u003ctd>any other Bash command\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-skill\">\u003c/span>orange\u003c/td>\u003ctd>skill\u003c/td>\u003ctd>Claude uses a skill. A skill is not a file in your repo, so it shows in the feed, the Tools counters and the Timeline\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-mcp\">\u003c/span>teal\u003c/td>\u003ctd>MCP\u003c/td>\u003ctd>a call to an MCP server tool; it lights a file when the call names one\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-tool\">\u003c/span>slate\u003c/td>\u003ctd>tool\u003c/td>\u003ctd>other Claude tools, such as Agent or WebFetch\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-subagent\">\u003c/span>yellow\u003c/td>\u003ctd>subagent\u003c/td>\u003ctd>a subagent starts or ends\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-fail\">\u003c/span>gray, blinking\u003c/td>\u003ctd>failure\u003c/td>\u003ctd>a tool call that failed\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-external\">\u003c/span>dim gray\u003c/td>\u003ctd>external change\u003c/td>\u003ctd>something changed on disk outside Claude (your editor, another terminal)\u003c/td>\u003c/tr>\u003c/tbody>\u003c/table>\u003c/div>\u003cp>The Legend at the bottom of the panel shows the same list inside the app.\u003c/p>","faq.disconnected.q":"Why do I see one dot and \"Disconnected\"?","faq.disconnected.a":"\u003cp>\"Disconnected\" means the page cannot reach its viewer. The tree arrives over that connection, so without it the network stays empty; the dot next to the Neurons name at the top is the logo. Most of the time the viewer behind that tab is no longer running. It was closed with \u003ccode>Ctrl+C\u003c/code> or \u003ccode>neu stop\u003c/code>, it crashed, or it started again on another port. It also happens when the page comes from somewhere other than the viewer, such as a Vite dev server started without \u003ccode>NEURONS_ALLOWED_ORIGINS\u003c/code>.\u003c/p>\u003cp>Run \u003ccode>neu ls\u003c/code> to see which viewers run and at which address. Start \u003ccode>neu\u003c/code> again in that repo: if it gets the same port, the open tab reconnects by itself, and if not, \u003ccode>neu open\u003c/code> opens the right address.\u003c/p>\u003cp>A single node with \"Connected\" is a different case: the viewer runs on a folder with nothing in its tree, usually an empty folder or the wrong one. The repo name next to the logo tells you which folder it is watching.\u003c/p>","faq.subagents.q":"How do I tell subagents and sessions apart?","faq.subagents.a":"\u003cp>Each subagent puts a colored ring of its own around the nodes it touches, and its rows in the feed name the agent type. The Agent filter in the panel lists every subagent so you can isolate one. A subagent that works in an isolated worktree shows up on the matching files of your main repo, with a \u003ccode>worktree\u003c/code> tag on its rows.\u003c/p>\u003cp>Sessions get a softer treatment. With two or more active sessions in the same repo, each one gets its own muted hue: a thin ring on the nodes it touches, a border on its feed rows and a chip in the Sessions line that filters by it. A session counts as active until it ends, or for 10 minutes after its last event. A \u003ccode>/clear\u003c/code> does not start a separate session in this sense. With a single session the view stays plain.\u003c/p>","faq.restart.q":"Do I need to restart Claude Code?","faq.restart.a":"\u003cp>No. A session that is already open picks up the hooks as soon as \u003ccode>neu\u003c/code> starts, and lets go of them when it stops, without any \u003ccode>hook error\u003c/code>. This was checked with Claude Code 2.1.288 in real interactive sessions. When it starts, \u003ccode>neu\u003c/code> lists the Claude Code sessions it finds open in the repo, with their process IDs.\u003c/p>\u003cp>With an older Claude Code, if a session shows no events, leave it with \u003ccode>/exit\u003c/code> and come back with \u003ccode>claude --continue\u003c/code>.\u003c/p>","faq.several-sessions.q":"Can I watch several sessions in the same repo?","faq.several-sessions.a":"\u003cp>Yes. They all show in the same network, each with its own hue once two or more are active (see \u003ca href=\"#faq-subagents\">subagents and sessions\u003c/a>). Use the Session filter or the chips in the Sessions line to look at one at a time.\u003c/p>","faq.several-repos.q":"Can I watch several repos?","faq.several-repos.a":"\u003cp>Yes, one viewer per repo, each on its own port: the first takes 7777, the next 7778, and so on. Two viewers on the same repo are not allowed; the second one refuses to start.\u003c/p>\u003cdiv class=\"table-wrap\">\u003ctable>\u003ctbody>\u003ctr>\u003ctd>\u003ccode>neu ls\u003c/code>\u003c/td>\u003ctd>lists the running viewers with repo, port, address and process ID\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003ccode>neu open [repo]\u003c/code>\u003c/td>\u003ctd>opens a viewer's page again. Without a repo it opens the one for the repo you are in, or the only one running\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003ccode>neu stop [repo]\u003c/code>\u003c/td>\u003ctd>closes that viewer; \u003ccode>--all\u003c/code> closes every one\u003c/td>\u003c/tr>\u003c/tbody>\u003c/table>\u003c/div>","faq.replay.q":"Can I replay a session?","faq.replay.a":"\u003cp>Yes. Every event is saved in \u003ccode>&lt;repo&gt;/.neurons/events.jsonl\u003c/code> (paths and metadata only). To watch it again:\u003c/p>\u003cpre>\u003ccode>neu replay ~/projects/api\u003c/code>\u003c/pre>\u003cp>You can also pass a \u003ccode>.jsonl\u003c/code> file, or press Replay log in the live view. Replay has play, pause, restart and speeds of 1x, 2x and 5x. Silences longer than 3 seconds are cut to 3 seconds, and the page tells you how much time it skipped.\u003c/p>","faq.timeline.q":"What is the Timeline view?","faq.timeline.a":"\u003cp>The third view, next to 3D and 2D. It answers when and in what order the agent touched each file. Each file becomes a row the first time Claude touches it, grouped by folder, and every action is a mark at its moment in the action's color. Your prompts appear as turns along the top, subagents get their own lane, and skills and MCP calls have a group of their own.\u003c/p>\u003cp>Scroll the wheel to zoom, drag to move, use Shift and the wheel (or the left column) to scroll the rows, and press \u003ccode>F\u003c/code> to follow live. Click a mark for its details, or a row for that file's history.\u003c/p>","faq.detail.q":"How do I see the details of an action?","faq.detail.a":"\u003cp>Click a row in the activity feed, or a mark in the Timeline. A drawer opens with the time, session, agent, tool and paths, plus whatever applies to that action: the Bash command (with written content blanked out), Claude's own description of why it ran it, the search pattern, how long it took and the first line of an error. The arrow keys move to the previous and next event, \u003ccode>Esc\u003c/code> closes it, and Show in graph points the camera at the file.\u003c/p>\u003cp>Click a file node to see every event for that file.\u003c/p>\u003cp>The live stream is a switch in the panel. It shows a short floating line over the network, such as \"Reading src/api/orders.ts\", for whatever Claude is doing right now.\u003c/p>","faq.tools.q":"What do the Tools counters show?","faq.tools.a":"\u003cp>The Tools section of the panel counts what the agent used, in four groups: skills by name, MCP calls by server and tool, CLI programs that Bash commands ran (\u003ccode>git\u003c/code>, \u003ccode>npm\u003c/code>, \u003ccode>gh\u003c/code> and so on) and Claude's built-in tools such as Read, Edit or Agent.\u003c/p>","faq.touches.q":"What does it touch on my machine?","faq.touches.a":"\u003cp>While \u003ccode>neu\u003c/code> runs:\u003c/p>\u003col>\u003cli>It writes HTTP hooks into \u003ccode>&lt;repo&gt;/.claude/settings.local.json\u003c/code>, pointing at its own server on \u003ccode>127.0.0.1\u003c/code>. Hooks you already had there stay. If the file did not exist, it creates it.\u003c/li>\u003cli>It turns on \u003ccode>bashEditDiffEnabled\u003c/code> in \u003ccode>~/.claude/settings.json\u003c/code> (or in \u003ccode>$CLAUDE_CONFIG_DIR\u003c/code>), so Claude Code reports which files each Bash command changed. If it was already on, it is left alone. \u003ccode>--no-bash-diff\u003c/code> skips this. A record of the change lives in \u003ccode>~/.claude/neurons/\u003c/code> with 0600 permissions.\u003c/li>\u003cli>It creates \u003ccode>&lt;repo&gt;/.neurons/\u003c/code> with the event log and a lock. That folder and \u003ccode>settings.local.json\u003c/code> go into \u003ccode>.git/info/exclude\u003c/code>, so they never show in \u003ccode>git status\u003c/code>.\u003c/li>\u003cli>It notes the viewer in \u003ccode>~/.neurons/viewers/&lt;pid&gt;.json\u003c/code> so \u003ccode>ls\u003c/code>, \u003ccode>open\u003c/code> and \u003ccode>stop\u003c/code> can find it.\u003c/li>\u003c/ol>\u003cp>When it closes, it removes its hooks, reverts \u003ccode>bashEditDiffEnabled\u003c/code> and deletes its entry. If nothing else changed in between, the files end up identical byte for byte. It never sends a signal to your Claude Code sessions, and \u003ccode>neu stop\u003c/code> only signals a process after \u003ccode>ps\u003c/code> confirms it is that viewer.\u003c/p>","faq.crash.q":"What if it crashes?","faq.crash.a":"\u003cp>If the viewer dies without cleaning up, its hooks stay and point at a server that is gone, so Claude Code prints a red \u003ccode>hook error\u003c/code> on each tool call. Fix it with:\u003c/p>\u003cpre>\u003ccode>neu uninstall ~/projects/api\u003c/code>\u003c/pre>\u003cp>That removes the hooks and reverts \u003ccode>bashEditDiffEnabled\u003c/code>. The next \u003ccode>neu\u003c/code> on that repo also fixes whatever was left. \u003ccode>neu doctor\u003c/code> tells you when there are hooks without a viewer. If a viewer hangs and does not close within 8 seconds, \u003ccode>neu stop --force\u003c/code> kills it and does the cleanup itself.\u003c/p>","faq.content.q":"Does it see what my files contain?","faq.content.a":"\u003cp>No. Claude Code's hook messages do include content (what a Write puts in a file, the old and new text of an Edit, the output of a command), and the server drops all of it before anything else happens. The page and the log only get paths and metadata.\u003c/p>\u003cp>Bash commands are shown so you know what ran, with heredoc bodies cut and quoted text blanked out when a command writes files or runs inline code. Command output never leaves the server; for searches, the server only takes the file paths out of the results and checks them against the tree. A failed tool keeps the first line of its error. Everything stays on \u003ccode>127.0.0.1\u003c/code>.\u003c/p>","faq.demo.q":"How do I demo it without breaking anything?","faq.demo.a":"\u003cp>Clone Neurons itself (or any repo) into a throwaway folder, let Claude change whatever it wants there, and delete the clone at the end. Your real repos and settings stay out of it. Tested on 2026-10-03 with Claude Code 2.1.288: the network stayed at 114 nodes, the worktree subagent showed up on \u003ccode>src/cli/\u003c/code> with its \u003ccode>worktree\u003c/code> tag, and \u003ccode>~/.claude/settings.json\u003c/code> was identical after closing.\u003c/p>\u003cpre>\u003ccode>git clone ~/neurons /tmp/neurons-demo-clone\ncd /tmp/neurons-demo-clone &amp;&amp; neu      # terminal 1: opens the page\ncd /tmp/neurons-demo-clone &amp;&amp; claude   # terminal 2\u003c/code>\u003c/pre>\u003cp>Then paste this prompt into Claude Code:\u003c/p>\u003cpre class=\"wrap\">\u003ccode>This is a throwaway clone of Neurons, so you can change anything. Do this in order and answer briefly at the end:\n1. Use grep to find where \"bashEditDiff\" is used in src/ and list the .ts files in web/src.\n2. Read src/server/server.ts, src/server/attribution.ts and web/src/effects.ts.\n3. In src/server/eventlog.ts add a one-line comment at the very top: \"// demo: edit seen in Neurons\".\n4. Create docs/demo-notes.md with three lines that sum up what attribution.ts does.\n5. Rename docs/PAYLOADS.md to docs/payloads-phase0.md with git mv.\n6. Delete scripts/make-demo-repo.sh with rm.\n7. Run \"cat does-not-exist.txt\" (it will fail on purpose).\n8. Launch two subagents in parallel: one with the Agent tool and isolation \"worktree\" that reads all of src/cli/ and tells you which commands exist, and another without a worktree that reads test/unit/attribution.test.ts and tells you how many cases it tests.\n9. With what they tell you, add one line at the end of docs/demo-notes.md.\u003c/code>\u003c/pre>\u003cp>To throw it away: \u003ccode>neu stop\u003c/code> (or \u003ccode>Ctrl+C\u003c/code> in terminal 1) and \u003ccode>rm -rf /tmp/neurons-demo-clone\u003c/code>.\u003c/p>","faq.demo-small.q":"Is there a smaller demo repo?","faq.demo-small.a":"\u003cp>Yes. \u003ccode>scripts/make-demo-repo.sh\u003c/code> creates a 14-file shop API in TypeScript, with a \u003ccode>CLAUDE.md\u003c/code>, a \u003ccode>src/CLAUDE.md\u003c/code> and a rule in \u003ccode>.claude/rules/api.md\u003c/code>, so you can watch instructions load on their own.\u003c/p>\u003cpre>\u003ccode>~/neurons/scripts/make-demo-repo.sh ~/neurons-demo\ncd ~/neurons-demo &amp;&amp; neu      # terminal 1\ncd ~/neurons-demo &amp;&amp; claude   # terminal 2\u003c/code>\u003c/pre>\u003cp>A prompt that walks through every kind of action:\u003c/p>\u003cpre class=\"wrap\">\u003ccode>I'm exploring this repo. Do this in order, one step at a time:\n1. Find every .ts file in the project and search for TODO comments.\n2. Read src/api/products.ts, src/api/orders.ts and src/utils/money.ts.\n3. In src/api/products.ts, replace the TODO in getProduct with a check that throws an Error if id is empty.\n4. Create src/api/health.ts with a function health() that returns { ok: true }.\n5. Delete src/utils/legacy-format.ts with rm from Bash (nothing uses it).\n6. Hand this task to a subagent: read src/services/cart.ts and tests/cart.test.ts and tell you whether the test covers cartTotal.\nAnswer briefly at the end.\u003c/code>\u003c/pre>\u003cdiv class=\"table-wrap\">\u003ctable>\u003cthead>\u003ctr>\u003cth>Step\u003c/th>\u003cth>What lights up\u003c/th>\u003c/tr>\u003c/thead>\u003ctbody>\u003ctr>\u003ctd>Session start\u003c/td>\u003ctd>\u003ccode>CLAUDE.md\u003c/code> glows violet; your own \u003ccode>~/.claude/CLAUDE.md\u003c/code> appears in the outside cluster\u003c/td>\u003c/tr>\u003ctr>\u003ctd>1, search\u003c/td>\u003ctd>a blue pulse at the root and faint flashes on the files found\u003c/td>\u003c/tr>\u003ctr>\u003ctd>2, reads\u003c/td>\u003ctd>cyan light down to each file, faint first, then full\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Inside \u003ccode>src/api\u003c/code>\u003c/td>\u003ctd>\u003ccode>src/CLAUDE.md\u003c/code> and \u003ccode>.claude/rules/api.md\u003c/code> turn violet with no tool involved\u003c/td>\u003c/tr>\u003ctr>\u003ctd>3, edit\u003c/td>\u003ctd>amber on \u003ccode>products.ts\u003c/code>\u003c/td>\u003c/tr>\u003ctr>\u003ctd>4, create\u003c/td>\u003ctd>a new \u003ccode>health.ts\u003c/code> node appears with a green flash\u003c/td>\u003c/tr>\u003ctr>\u003ctd>5, delete\u003c/td>\u003ctd>red on \u003ccode>legacy-format.ts\u003c/code>, which then leaves the tree\u003c/td>\u003c/tr>\u003ctr>\u003ctd>6, subagent\u003c/td>\u003ctd>its reads carry a ring of another color\u003c/td>\u003c/tr>\u003c/tbody>\u003c/table>\u003c/div>\u003cp>To see an external change, delete a file from another terminal while the viewer runs. It shows in dim gray.\u003c/p>","faq.how.q":"How does it work?","faq.how.a":"\u003cp>Claude Code sends each event as an HTTP hook to the \u003ccode>neu\u003c/code> server on \u003ccode>127.0.0.1\u003c/code>. The server answers right away with an empty \u003ccode>204\u003c/code>, so Claude never waits on it, then turns the event into paths relative to the repo, sends it to the page over a WebSocket and appends it to \u003ccode>.neurons/events.jsonl\u003c/code>. A disk watcher catches changes made outside Claude and marks them as external.\u003c/p>\u003cp>The \u003ca class=\"arch-link\" href=\"architecture.html\">architecture page\u003c/a> explains it step by step with animated diagrams.\u003c/p>","faq.os.q":"Which operating systems does it run on?","faq.os.a":"\u003cdiv class=\"table-wrap\">\u003ctable>\u003cthead>\u003ctr>\u003cth>System\u003c/th>\u003cth>Status\u003c/th>\u003cth>Notes\u003c/th>\u003c/tr>\u003c/thead>\u003ctbody>\u003ctr>\u003ctd>macOS\u003c/td>\u003ctd>\u003cspan class=\"status status-ok\">Verified\u003c/span>\u003c/td>\u003ctd>Automated tests and real Claude Code sessions on Apple Silicon (M4).\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Linux\u003c/td>\u003ctd>\u003cspan class=\"status status-mid\">Expected to work\u003c/span>\u003c/td>\u003ctd>The test suite is meant to run on Linux in CI, which has not run yet. The disk watcher watches every subfolder (including \u003ccode>node_modules\u003c/code> and \u003ccode>.git\u003c/code>) and can hit the inotify limit; if it does, the viewer warns you and keeps working with Claude's events only, without external changes. Opening the browser with \u003ccode>xdg-open\u003c/code> is untested.\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Windows\u003c/td>\u003ctd>\u003cspan class=\"status status-low\">Experimental\u003c/span>\u003c/td>\u003ctd>Written for, never run. Path matching (drive letters, case, Git Bash paths like \u003ccode>/c/...\u003c/code>) has not been checked against real Claude Code payloads. Windows ends a process at once, so \u003ccode>neu stop\u003c/code> does the cleanup itself; if that fails, run \u003ccode>neu uninstall\u003c/code>. Open Claude Code sessions are not detected at start. The managed settings path has not been checked.\u003c/td>\u003c/tr>\u003c/tbody>\u003c/table>\u003c/div>","faq.lang.q":"How do I change the language?","faq.lang.a":"\u003cp>In this guide and in the viewer, use the EN and ES buttons at the top; both remember your choice. In the terminal, add \u003ccode>--lang en\u003c/code> or \u003ccode>--lang es\u003c/code>, or set \u003ccode>NEURONS_LANG\u003c/code>. Without either, \u003ccode>neu\u003c/code> follows your system language.\u003c/p>","faq.publish.q":"Will it be on npm or Homebrew?","faq.publish.a":"\u003cp>Not yet, and there is no date. For now you install it from the repository with \u003ccode>npm link\u003c/code>. The package is already set up for npm (name \u003ccode>neurons-cli\u003c/code>, the two commands, only \u003ccode>dist/\u003c/code> is shipped), so publishing it later would make the install a single \u003ccode>npm install -g neurons-cli\u003c/code>. A Homebrew formula could come after that.\u003c/p>","footer.text":"Neurons 0.3.0 · MIT license","footer.arch":"How it works"},"es":{"meta.title":"Guía de Neurons","meta.description":"Cómo instalar y usar Neurons, la vista en vivo de lo que hace Claude Code en un repositorio, con respuestas a las preguntas más comunes.","a11y.skip":"Ir al contenido","nav.aria":"Secciones","nav.setup":"Instalar","nav.use":"Usar","nav.faq":"Preguntas","nav.architecture":"Arquitectura","lang.label":"Idioma","lang.enTitle":"English","lang.esTitle":"Español","copy.button":"Copiar","copy.done":"Copiado","copy.failed":"Seleccioná y copiá","copy.aria":"Copiar al portapapeles","hero.eyebrow":"Neurons · guía de uso","hero.title":"Mirá lo que hace Claude Code en tu repo, mientras lo hace","hero.lead":"Neurons es un comando, \u003ccode>neu\u003c/code>, que abre una página en el navegador con tu repositorio dibujado como una red. Cada archivo y cada carpeta es un nodo. Cuando Claude Code lee, busca, edita, crea o borra algo, una luz viaja hasta ese archivo con el color de la acción.","hero.lead2":"Sirve para mirar cómo trabaja el agente: qué lee primero, cuánto explora antes de editar, qué instrucciones se cargan solas y en qué andan sus subagentes. Corre en tu máquina y solo mira rutas, nunca lo que tienen adentro tus archivos.","hero.imgAlt":"Neurons mostrando su propio repositorio como una red luminosa, con lecturas en cian, una edición en ámbar y el panel de actividad a la derecha","hero.caption":"El visor sobre el repositorio del propio Neurons. Las líneas cian son lecturas, la ámbar es una edición, el repo queda en el centro y los archivos de afuera (tu ~/.claude) arman su propio cúmulo a la izquierda. La actividad flotante, abajo a la izquierda, dice qué está haciendo Claude; el panel de la derecha tiene los contadores, las herramientas usadas y cada acción.","hero.req":"Necesitás Node 22.12 o superior, git y Claude Code. Probado con Claude Code 2.1.285 y 2.1.288 en macOS.","ai.title":"Instalalo con tu IA","ai.lead":"Abrí Claude Code en cualquier carpeta y pegá este prompt. Antes reemplazá \u003ccode>&lt;repo-url&gt;\u003c/code> por la dirección de donde sacaste Neurons, que puede ser una URL de Git o una carpeta de tu disco. Claude lo clona en \u003ccode>~/neurons\u003c/code>, lo compila, enlaza el comando \u003ccode>neu\u003c/code> y revisa que ande.","ai.prompt":"Instalá el CLI de Neurons (paquete npm neurons-cli) en esta máquina. Hacé estos pasos en orden y frená para avisarme si alguno falla.\n\n1. Corré `node --version`. Neurons necesita Node 22.12 o superior. Si el mío es más viejo, frená y decime cómo actualizarlo; no toques mi instalación de Node vos.\n2. Cloná el repositorio: `git clone \u003crepo-url> ~/neurons`. Si \u003crepo-url> sigue siendo un marcador, pedímelo. Si ~/neurons ya existe, preguntame antes de tocarlo.\n3. En ~/neurons corré `npm install` y después `npm run build`. El build tiene que dejar el archivo ~/neurons/dist/cli.mjs.\n4. En ~/neurons corré `npm link`. Eso deja dos comandos globales en mi PATH, `neu` y `neurons`, que son el mismo programa. Si falla con EEXIST porque otro paquete ya es dueño de `neu`, decime qué paquete es y no uses --force sin preguntarme. Si falla con EACCES, explicame las opciones en vez de usar sudo.\n5. Revisá la instalación: `neu --version` tiene que mostrar una versión y `neu doctor` tiene que correr. Mostrame lo que dice doctor. Que avise que los hooks no están instalados es normal en este punto.\n6. Contame en dos líneas cómo se usa: entrar con cd a cualquier repositorio y correr `neu`, y después abrir Claude Code en ese mismo repositorio.\n\nSi quiero que el comando tenga otro nombre, los nombres salen del campo \"bin\" de ~/neurons/package.json. Se cambia una clave ahí (por ejemplo \"neu\" por \"nr\") y se corre `npm unlink -g neurons-cli` y después `npm link` otra vez. Preguntame si lo quiero antes de cambiar nada.","ai.note":"El prompt hace que Claude frene y pregunte antes de tocar una carpeta \u003ccode>~/neurons\u003c/code> que ya exista o de forzar el link sobre el \u003ccode>neu\u003c/code> de otro paquete.","manual.title":"Instalalo a mano","manual.lead":"Los mismos pasos, tipeados por vos.","manual.s1.title":"Cloná y compilá","manual.s1.body":"\u003ccode>npm run build\u003c/code> compila la página web, el CLI y esta guía en \u003ccode>dist/\u003c/code>.","manual.s2.title":"Enlazá el comando","manual.s2.body":"Esto deja \u003ccode>neu\u003c/code> y \u003ccode>neurons\u003c/code> en tu PATH (son el mismo programa), apuntando a \u003ccode>~/neurons/dist/cli.mjs\u003c/code>. Para quitarlos más adelante, corré \u003ccode>npm unlink -g neurons-cli\u003c/code>. Si \u003ccode>npm link\u003c/code> falla con \u003ccode>EACCES\u003c/code>, tu carpeta global de npm es de root; un gestor de versiones de Node como nvm o fnm lo evita sin sudo.","manual.s3.title":"Revisalo","manual.s3.body":"\u003ccode>neu --version\u003c/code> muestra la versión. \u003ccode>neu doctor\u003c/code> revisa Node, los hooks, los archivos de configuración de Claude Code y si la página está compilada.","manual.s4.title":"Elegí otro nombre (opcional)","manual.s4.body":"Los nombres del comando salen de \u003ccode>\"bin\"\u003c/code> en \u003ccode>~/neurons/package.json\u003c/code>. Cambiá una clave, por ejemplo \u003ccode>neu\u003c/code> por \u003ccode>nr\u003c/code>, y después sacá el link y volvé a enlazar. La ayuda y los mensajes siguen diciendo \u003ccode>neu\u003c/code>.","use.title":"Usalo","use.s1.title":"Levantá el visor en tu repo","use.s1.body":"El navegador se abre en \u003ccode>http://127.0.0.1:7777\u003c/code> (o en el siguiente puerto libre). Desde una subcarpeta, \u003ccode>neu\u003c/code> sube hasta la raíz del repositorio git y te avisa. También podés pasarle la carpeta: \u003ccode>neu ~/proyectos/api\u003c/code>.","use.s1.code":"cd ~/proyectos/mi-repo\nneu","use.s2.title":"Abrí Claude Code en ese repo","use.s2.body":"En otra terminal, como siempre. Una sesión que ya estaba abierta toma los hooks sin reiniciar. La red se ilumina con cada acción.","use.s2.code":"cd ~/proyectos/mi-repo\nclaude","use.s3.title":"Cerralo","use.s3.body":"Apretá \u003ccode>Ctrl+C\u003c/code> en la terminal donde corre \u003ccode>neu\u003c/code>, o corré \u003ccode>neu stop\u003c/code> desde cualquier otra. Los hooks se quitan y tu configuración vuelve a quedar como estaba, byte a byte.","use.more":"Mientras el visor corre, esta guía también está en \u003ccode>/help\u003c/code> y la página de arquitectura en \u003ccode>/architecture\u003c/code>, en la misma dirección. \u003ccode>neu help\u003c/code> lista todos los comandos y opciones.","faq.title":"Preguntas","faq.lead":"Agrupadas por tema. Cada pregunta tiene su propio link, así podés mandar a alguien directo a una respuesta.","faq.searchLabel":"Buscar en las preguntas","faq.searchPlaceholder":"Buscá: replay, colores, Windows…","faq.empty":"Ninguna pregunta coincide con esa búsqueda.","faq.link":"Link a esta respuesta","faq.group.start":"Para empezar","faq.group.see":"Qué veo","faq.group.daily":"Uso diario","faq.group.safety":"Seguridad y privacidad","faq.group.demo":"Demo","faq.group.how":"Por dentro","faq.group.later":"Más adelante: publicación","faq.what.q":"¿Qué es Neurons?","faq.what.a":"\u003cp>Un mapa en vivo de lo que hace Claude Code dentro de un repositorio. Tu repo se convierte en una red de archivos y carpetas, y cada acción del agente (una lectura, una búsqueda, una edición, un archivo nuevo, un borrado, un comando) aparece como una luz sobre el archivo que tocó. Un panel lateral lista esas mismas acciones con sus detalles, y una línea de tiempo las muestra en orden.\u003c/p>\u003cp>Está pensado para mirar y aprender: cómo explora el agente un código, cuántos archivos lee antes de cambiar uno, qué archivos \u003ccode>CLAUDE.md\u003c/code> y qué reglas carga, y qué hacen sus subagentes.\u003c/p>","faq.cli.q":"¿Es un CLI?","faq.cli.a":"\u003cp>Sí. Corrés \u003ccode>neu\u003c/code> en una terminal. Levanta un servidor chico en \u003ccode>127.0.0.1\u003c/code>, le dice a Claude Code que le mande sus eventos mientras corre y abre la página en el navegador. No hay cuenta ni servicio en la nube, y nada sale de tu máquina.\u003c/p>\u003cp>\u003ccode>neurons\u003c/code> es el mismo comando con un nombre más largo.\u003c/p>","faq.install.q":"¿Cómo lo instalo?","faq.install.a":"\u003cp>Neurons todavía no está en npm, así que se instala desde su repositorio: clonar, \u003ccode>npm install\u003c/code>, \u003ccode>npm run build\u003c/code> y \u003ccode>npm link\u003c/code>. Podés \u003ca href=\"#setup-ai\">dejar que lo haga Claude con un prompt\u003c/a> o \u003ca href=\"#setup-manual\">tipear los pasos vos\u003c/a>. Necesitás Node 22.12 o superior.\u003c/p>","faq.other-repo.q":"¿Cómo lo uso en otro repo?","faq.other-repo.a":"\u003cp>Andá a ese repo y corré \u003ccode>neu\u003c/code>, o pasale la ruta desde donde estés: \u003ccode>neu ~/proyectos/api\u003c/code>. No hace falta instalar nada por repo. \u003ccode>neu\u003c/code> escribe sus hooks en ese repo al arrancar y los quita al cerrar.\u003c/p>\u003cp>Cada repo tiene su propio visor en su propio puerto, así que podés mirar varios a la vez. Mirá \u003ca href=\"#faq-several-repos\">varios repos\u003c/a>.\u003c/p>","faq.nodes.q":"¿Qué son los nodos y las líneas?","faq.nodes.a":"\u003cp>Cada archivo y cada carpeta es un nodo. Las líneas unen cada elemento con la carpeta donde vive, así que la red es tu árbol de carpetas, con la raíz del repositorio como el nodo grande del medio. Cuando pasa algo, la luz viaja desde la raíz por esas líneas hasta el archivo.\u003c/p>\u003cp>Los archivos de afuera del repo que toca Claude, como tus skills en \u003ccode>~/.claude\u003c/code> o algo en \u003ccode>/tmp\u003c/code>, se juntan en un cúmulo aparte. Los archivos más tocados conservan un brillo suave, como un mapa de calor. En repos de más de 1.500 nodos las carpetas arrancan colapsadas y se abren solas cuando Claude entra en ellas; también podés hacer clic en una carpeta colapsada para abrirla.\u003c/p>","faq.colors.q":"¿Qué significa cada color?","faq.colors.a":"\u003cp>El color es el tipo de acción. Un pulso tenue quiere decir que Claude decidió usar una herramienta; el pulso completo, que la herramienta terminó.\u003c/p>\u003cdiv class=\"table-wrap\">\u003ctable class=\"colors\">\u003cthead>\u003ctr>\u003cth>Color\u003c/th>\u003cth>Acción\u003c/th>\u003cth>Qué la dispara\u003c/th>\u003c/tr>\u003c/thead>\u003ctbody>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-read\">\u003c/span>cian\u003c/td>\u003ctd>lectura\u003c/td>\u003ctd>Claude lee un archivo\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-search\">\u003c/span>azul\u003c/td>\u003ctd>búsqueda\u003c/td>\u003ctd>\u003ccode>grep\u003c/code>, \u003ccode>rg\u003c/code>, \u003ccode>find\u003c/code>, Glob o Grep; los archivos encontrados destellan tenue\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-edit\">\u003c/span>ámbar\u003c/td>\u003ctd>edición\u003c/td>\u003ctd>un cambio en un archivo existente\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-create\">\u003c/span>verde\u003c/td>\u003ctd>creación\u003c/td>\u003ctd>un archivo o una carpeta nueva\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-delete\">\u003c/span>rojo\u003c/td>\u003ctd>borrado\u003c/td>\u003ctd>un archivo o una carpeta que se borró\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-move\">\u003c/span>rosa\u003c/td>\u003ctd>movimiento\u003c/td>\u003ctd>\u003ccode>mv\u003c/code> o \u003ccode>git mv\u003c/code>\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-context\">\u003c/span>violeta\u003c/td>\u003ctd>contexto\u003c/td>\u003ctd>instrucciones que se cargan solas: \u003ccode>CLAUDE.md\u003c/code>, \u003ccode>.claude/rules\u003c/code>\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-bash\">\u003c/span>blanco\u003c/td>\u003ctd>comando\u003c/td>\u003ctd>cualquier otro comando de Bash\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-skill\">\u003c/span>naranja\u003c/td>\u003ctd>skill\u003c/td>\u003ctd>Claude usa una skill. Una skill no es un archivo de tu repo, así que aparece en el feed, en los contadores de Herramientas y en la línea de tiempo\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-mcp\">\u003c/span>verde azulado\u003c/td>\u003ctd>MCP\u003c/td>\u003ctd>una llamada a una herramienta de un servidor MCP; ilumina un archivo cuando la llamada nombra uno\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-tool\">\u003c/span>pizarra\u003c/td>\u003ctd>herramienta\u003c/td>\u003ctd>otras herramientas de Claude, como Agent o WebFetch\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-subagent\">\u003c/span>amarillo\u003c/td>\u003ctd>subagente\u003c/td>\u003ctd>un subagente arranca o termina\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-fail\">\u003c/span>gris con parpadeo\u003c/td>\u003ctd>fallo\u003c/td>\u003ctd>una herramienta que falló\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003cspan class=\"sw sw-external\">\u003c/span>gris tenue\u003c/td>\u003ctd>cambio externo\u003c/td>\u003ctd>algo cambió en el disco por fuera de Claude (tu editor, otra terminal)\u003c/td>\u003c/tr>\u003c/tbody>\u003c/table>\u003c/div>\u003cp>La Leyenda, abajo de todo en el panel, muestra la misma lista dentro de la app.\u003c/p>","faq.disconnected.q":"¿Por qué veo un solo punto y \"Sin conexión\"?","faq.disconnected.a":"\u003cp>\"Sin conexión\" quiere decir que la página no llega a su visor. El árbol llega por esa conexión, así que sin ella la red queda vacía; el punto al lado del nombre Neurons, arriba, es el logo. Casi siempre el visor de esa pestaña ya no está corriendo. Se cerró con \u003ccode>Ctrl+C\u003c/code> o \u003ccode>neu stop\u003c/code>, se cayó, o volvió a arrancar en otro puerto. También pasa cuando la página la sirve otra cosa que no es el visor, como un servidor de desarrollo de Vite levantado sin \u003ccode>NEURONS_ALLOWED_ORIGINS\u003c/code>.\u003c/p>\u003cp>Corré \u003ccode>neu ls\u003c/code> para ver qué visores corren y en qué dirección. Volvé a correr \u003ccode>neu\u003c/code> en ese repo: si toma el mismo puerto, la pestaña abierta se reconecta sola, y si no, \u003ccode>neu open\u003c/code> abre la dirección correcta.\u003c/p>\u003cp>Un solo nodo con \"Conectado\" es otro caso: el visor corre sobre una carpeta sin nada en su árbol, casi siempre una carpeta vacía o la equivocada. El nombre del repo, al lado del logo, te dice qué carpeta está mirando.\u003c/p>","faq.subagents.q":"¿Cómo distingo subagentes y sesiones?","faq.subagents.a":"\u003cp>Cada subagente pone un anillo de color propio alrededor de los nodos que toca, y sus filas en el feed dicen el tipo de agente. El filtro Agente del panel lista cada subagente para que puedas aislar uno. Un subagente que trabaja en un worktree aislado se ve sobre los archivos equivalentes de tu repo principal, con la etiqueta \u003ccode>worktree\u003c/code> en sus filas.\u003c/p>\u003cp>Las sesiones llevan algo más suave. Con dos o más sesiones activas en el mismo repo, cada una recibe un tono apagado propio: un anillo fino en los nodos que toca, un borde en sus filas del feed y un chip en la línea Sesiones que filtra por ella. Una sesión cuenta como activa hasta que termina, o durante los 10 minutos siguientes a su último evento. Un \u003ccode>/clear\u003c/code> no cuenta como sesión aparte. Con una sola sesión la vista queda limpia.\u003c/p>","faq.restart.q":"¿Tengo que reiniciar Claude Code?","faq.restart.a":"\u003cp>No. Una sesión que ya está abierta toma los hooks apenas arranca \u003ccode>neu\u003c/code> y los suelta cuando se cierra, sin ningún \u003ccode>hook error\u003c/code>. Se verificó con Claude Code 2.1.288 en sesiones interactivas reales. Al arrancar, \u003ccode>neu\u003c/code> lista las sesiones de Claude Code que encuentra abiertas en el repo, con su PID.\u003c/p>\u003cp>Con un Claude Code más viejo, si una sesión no muestra eventos, salí con \u003ccode>/exit\u003c/code> y volvé con \u003ccode>claude --continue\u003c/code>.\u003c/p>","faq.several-sessions.q":"¿Puedo mirar varias sesiones en el mismo repo?","faq.several-sessions.a":"\u003cp>Sí. Todas se ven en la misma red, cada una con su tono cuando hay dos o más activas (mirá \u003ca href=\"#faq-subagents\">subagentes y sesiones\u003c/a>). Usá el filtro Sesión o los chips de la línea Sesiones para ver una por vez.\u003c/p>","faq.several-repos.q":"¿Puedo mirar varios repos?","faq.several-repos.a":"\u003cp>Sí, un visor por repo, cada uno en su propio puerto: el primero toma el 7777, el siguiente el 7778, y así. Dos visores sobre el mismo repo no se permiten; el segundo se niega a arrancar.\u003c/p>\u003cdiv class=\"table-wrap\">\u003ctable>\u003ctbody>\u003ctr>\u003ctd>\u003ccode>neu ls\u003c/code>\u003c/td>\u003ctd>lista los visores que corren con repo, puerto, dirección y PID\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003ccode>neu open [repo]\u003c/code>\u003c/td>\u003ctd>vuelve a abrir la página de un visor. Sin repo abre el del repo donde estás, o el único que esté corriendo\u003c/td>\u003c/tr>\u003ctr>\u003ctd>\u003ccode>neu stop [repo]\u003c/code>\u003c/td>\u003ctd>cierra ese visor; \u003ccode>--all\u003c/code> los cierra todos\u003c/td>\u003c/tr>\u003c/tbody>\u003c/table>\u003c/div>","faq.replay.q":"¿Puedo reproducir una sesión?","faq.replay.a":"\u003cp>Sí. Cada evento queda guardado en \u003ccode>&lt;repo&gt;/.neurons/events.jsonl\u003c/code> (solo rutas y metadatos). Para verlo otra vez:\u003c/p>\u003cpre>\u003ccode>neu replay ~/proyectos/api\u003c/code>\u003c/pre>\u003cp>También podés pasarle un archivo \u003ccode>.jsonl\u003c/code>, o apretar Reproducir log en la vista en vivo. El replay tiene play, pausa, reiniciar y velocidades de 1x, 2x y 5x. Los silencios de más de 3 segundos se acortan a 3 segundos, y la página te dice cuánto tiempo salteó.\u003c/p>","faq.timeline.q":"¿Qué es la vista Línea de tiempo?","faq.timeline.a":"\u003cp>Es la tercera vista, al lado de 3D y 2D. Responde cuándo y en qué orden tocó el agente cada archivo. Cada archivo se vuelve una fila la primera vez que Claude lo toca, agrupado por carpeta, y cada acción es una marca en su momento, con el color de la acción. Tus prompts aparecen como turnos arriba, los subagentes tienen su propio carril y las skills y las llamadas MCP tienen un grupo propio.\u003c/p>\u003cp>Con la rueda hacés zoom, arrastrando te movés, con Shift y la rueda (o con la columna izquierda) desplazás las filas, y con \u003ccode>F\u003c/code> seguís en vivo. Hacé clic en una marca para ver su detalle, o en una fila para ver la historia de ese archivo.\u003c/p>","faq.detail.q":"¿Cómo veo el detalle de una acción?","faq.detail.a":"\u003cp>Hacé clic en una fila del feed de actividad, o en una marca de la línea de tiempo. Se abre un panel con la hora, la sesión, el agente, la herramienta y las rutas, más lo que corresponda a esa acción: el comando de Bash (con el contenido escrito tapado), la descripción que dio Claude de por qué lo corrió, el patrón de búsqueda, cuánto tardó y la primera línea de un error. Con las flechas pasás al evento anterior y al siguiente, \u003ccode>Esc\u003c/code> lo cierra y Mostrar en la red lleva la cámara hasta el archivo.\u003c/p>\u003cp>Hacé clic en el nodo de un archivo para ver todos sus eventos.\u003c/p>\u003cp>La actividad flotante es un interruptor del panel. Muestra una línea corta sobre la red, como \"Leyendo src/api/orders.ts\", con lo que Claude está haciendo en ese momento.\u003c/p>","faq.tools.q":"¿Qué muestran los contadores de Herramientas?","faq.tools.a":"\u003cp>La sección Herramientas del panel cuenta lo que usó el agente, en cuatro grupos: skills por nombre, llamadas MCP por servidor y herramienta, programas de CLI que corrieron los comandos de Bash (\u003ccode>git\u003c/code>, \u003ccode>npm\u003c/code>, \u003ccode>gh\u003c/code>, etc.) y las herramientas propias de Claude, como Read, Edit o Agent.\u003c/p>","faq.touches.q":"¿Qué toca en mi máquina?","faq.touches.a":"\u003cp>Mientras \u003ccode>neu\u003c/code> corre:\u003c/p>\u003col>\u003cli>Escribe hooks HTTP en \u003ccode>&lt;repo&gt;/.claude/settings.local.json\u003c/code>, que apuntan a su propio servidor en \u003ccode>127.0.0.1\u003c/code>. Los hooks que ya tenías ahí se quedan. Si el archivo no existía, lo crea.\u003c/li>\u003cli>Activa \u003ccode>bashEditDiffEnabled\u003c/code> en \u003ccode>~/.claude/settings.json\u003c/code> (o en \u003ccode>$CLAUDE_CONFIG_DIR\u003c/code>), así Claude Code informa qué archivos cambió cada comando de Bash. Si ya estaba activado, no lo toca. \u003ccode>--no-bash-diff\u003c/code> lo evita. El registro de ese cambio vive en \u003ccode>~/.claude/neurons/\u003c/code> con permisos 0600.\u003c/li>\u003cli>Crea \u003ccode>&lt;repo&gt;/.neurons/\u003c/code> con el log de eventos y un lock. Esa carpeta y \u003ccode>settings.local.json\u003c/code> van a \u003ccode>.git/info/exclude\u003c/code>, así que nunca aparecen en \u003ccode>git status\u003c/code>.\u003c/li>\u003cli>Anota el visor en \u003ccode>~/.neurons/viewers/&lt;pid&gt;.json\u003c/code> para que \u003ccode>ls\u003c/code>, \u003ccode>open\u003c/code> y \u003ccode>stop\u003c/code> lo encuentren.\u003c/li>\u003c/ol>\u003cp>Al cerrar quita sus hooks, revierte \u003ccode>bashEditDiffEnabled\u003c/code> y borra su entrada. Si no cambió nada más en el medio, los archivos quedan idénticos byte a byte. Nunca le manda una señal a tus sesiones de Claude Code, y \u003ccode>neu stop\u003c/code> solo le manda una señal a un proceso después de que \u003ccode>ps\u003c/code> confirma que es ese visor.\u003c/p>","faq.crash.q":"¿Y si se cae?","faq.crash.a":"\u003cp>Si el visor muere sin limpiar, sus hooks quedan apuntando a un servidor que ya no está, y Claude Code imprime un \u003ccode>hook error\u003c/code> en rojo en cada herramienta. Se arregla con:\u003c/p>\u003cpre>\u003ccode>neu uninstall ~/proyectos/api\u003c/code>\u003c/pre>\u003cp>Eso quita los hooks y revierte \u003ccode>bashEditDiffEnabled\u003c/code>. El próximo \u003ccode>neu\u003c/code> sobre ese repo también corrige lo que haya quedado. \u003ccode>neu doctor\u003c/code> te avisa cuando hay hooks sin visor. Si un visor se cuelga y no cierra en 8 segundos, \u003ccode>neu stop --force\u003c/code> lo mata y hace la limpieza por su cuenta.\u003c/p>","faq.content.q":"¿Ve lo que tienen adentro mis archivos?","faq.content.a":"\u003cp>No. Los mensajes de los hooks de Claude Code sí traen contenido (lo que un Write pone en un archivo, el texto viejo y el nuevo de un Edit, la salida de un comando), y el servidor descarta todo eso antes de hacer cualquier otra cosa. La página y el log reciben solo rutas y metadatos.\u003c/p>\u003cp>Los comandos de Bash se muestran para que sepas qué corrió, con el cuerpo de los heredoc cortado y el texto entre comillas tapado cuando el comando escribe archivos o corre código en línea. La salida de los comandos nunca sale del servidor; en las búsquedas, el servidor solo saca las rutas de los resultados y las valida contra el árbol. Una herramienta que falla conserva la primera línea de su error. Todo queda en \u003ccode>127.0.0.1\u003c/code>.\u003c/p>","faq.demo.q":"¿Cómo hago una demo sin romper nada?","faq.demo.a":"\u003cp>Cloná el propio Neurons (o cualquier repo) en una carpeta desechable, dejá que Claude cambie lo que quiera ahí y borrá el clon al final. Tus repos y tu configuración quedan afuera. Probado el 2026-10-03 con Claude Code 2.1.288: la red se mantuvo en 114 nodos, el subagente con worktree se vio sobre \u003ccode>src/cli/\u003c/code> con su etiqueta \u003ccode>worktree\u003c/code> y \u003ccode>~/.claude/settings.json\u003c/code> quedó idéntico al cerrar.\u003c/p>\u003cpre>\u003ccode>git clone ~/neurons /tmp/neurons-demo-clone\ncd /tmp/neurons-demo-clone &amp;&amp; neu      # terminal 1: abre la página\ncd /tmp/neurons-demo-clone &amp;&amp; claude   # terminal 2\u003c/code>\u003c/pre>\u003cp>Después pegá este prompt en Claude Code:\u003c/p>\u003cpre class=\"wrap\">\u003ccode>Este es un clon desechable de Neurons, así que podés cambiar lo que quieras. Hacé esto en orden y respondé corto al final:\n1. Buscá con grep dónde se usa \"bashEditDiff\" en src/ y listá los archivos .ts de web/src.\n2. Leé src/server/server.ts, src/server/attribution.ts y web/src/effects.ts.\n3. En src/server/eventlog.ts agregá arriba de todo un comentario de una línea: \"// demo: edición vista en Neurons\".\n4. Creá docs/notas-demo.md con tres líneas que resuman qué hace attribution.ts.\n5. Renombrá docs/PAYLOADS.md a docs/payloads-fase0.md con git mv.\n6. Borrá scripts/make-demo-repo.sh con rm.\n7. Corré \"cat no-existe.txt\" (va a fallar, es a propósito).\n8. Lanzá dos subagentes en paralelo: uno con la herramienta Agent e isolation \"worktree\" que lea todo src/cli/ y te diga qué comandos hay, y otro sin worktree que lea test/unit/attribution.test.ts y te diga cuántos casos prueba.\n9. Con lo que te digan, agregá una línea al final de docs/notas-demo.md.\u003c/code>\u003c/pre>\u003cp>Para descartarlo: \u003ccode>neu stop\u003c/code> (o \u003ccode>Ctrl+C\u003c/code> en la terminal 1) y \u003ccode>rm -rf /tmp/neurons-demo-clone\u003c/code>.\u003c/p>","faq.demo-small.q":"¿Hay un repo de demo más chico?","faq.demo-small.a":"\u003cp>Sí. \u003ccode>scripts/make-demo-repo.sh\u003c/code> crea una API de tienda de 14 archivos en TypeScript, con un \u003ccode>CLAUDE.md\u003c/code>, un \u003ccode>src/CLAUDE.md\u003c/code> y una regla en \u003ccode>.claude/rules/api.md\u003c/code>, así ves cómo se cargan solas las instrucciones.\u003c/p>\u003cpre>\u003ccode>~/neurons/scripts/make-demo-repo.sh ~/neurons-demo\ncd ~/neurons-demo &amp;&amp; neu      # terminal 1\ncd ~/neurons-demo &amp;&amp; claude   # terminal 2\u003c/code>\u003c/pre>\u003cp>Un prompt que pasa por todos los tipos de acción:\u003c/p>\u003cpre class=\"wrap\">\u003ccode>Estoy explorando este repo. Hacé esto en orden, un paso por vez:\n1. Buscá todos los archivos .ts del proyecto y buscá dónde hay comentarios TODO.\n2. Leé src/api/products.ts, src/api/orders.ts y src/utils/money.ts.\n3. En src/api/products.ts, reemplazá el TODO de getProduct por una validación que lance un Error si id está vacío.\n4. Creá src/api/health.ts con una función health() que devuelva { ok: true }.\n5. Borrá src/utils/legacy-format.ts con rm desde Bash (nadie lo usa).\n6. Delegá a un subagente esta tarea: que lea src/services/cart.ts y tests/cart.test.ts y te diga si el test cubre cartTotal.\nRespondé corto al final.\u003c/code>\u003c/pre>\u003cdiv class=\"table-wrap\">\u003ctable>\u003cthead>\u003ctr>\u003cth>Paso\u003c/th>\u003cth>Qué se ilumina\u003c/th>\u003c/tr>\u003c/thead>\u003ctbody>\u003ctr>\u003ctd>Arranque de la sesión\u003c/td>\u003ctd>\u003ccode>CLAUDE.md\u003c/code> brilla violeta; tu propio \u003ccode>~/.claude/CLAUDE.md\u003c/code> aparece en el cúmulo de afuera\u003c/td>\u003c/tr>\u003ctr>\u003ctd>1, búsqueda\u003c/td>\u003ctd>un pulso azul en la raíz y destellos tenues en los archivos encontrados\u003c/td>\u003c/tr>\u003ctr>\u003ctd>2, lecturas\u003c/td>\u003ctd>luz cian hasta cada archivo, primero tenue y después completa\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Dentro de \u003ccode>src/api\u003c/code>\u003c/td>\u003ctd>\u003ccode>src/CLAUDE.md\u003c/code> y \u003ccode>.claude/rules/api.md\u003c/code> se ponen violeta sin ninguna herramienta\u003c/td>\u003c/tr>\u003ctr>\u003ctd>3, edición\u003c/td>\u003ctd>ámbar sobre \u003ccode>products.ts\u003c/code>\u003c/td>\u003c/tr>\u003ctr>\u003ctd>4, creación\u003c/td>\u003ctd>aparece un nodo nuevo \u003ccode>health.ts\u003c/code> con un destello verde\u003c/td>\u003c/tr>\u003ctr>\u003ctd>5, borrado\u003c/td>\u003ctd>rojo sobre \u003ccode>legacy-format.ts\u003c/code>, que después sale del árbol\u003c/td>\u003c/tr>\u003ctr>\u003ctd>6, subagente\u003c/td>\u003ctd>sus lecturas llevan un anillo de otro color\u003c/td>\u003c/tr>\u003c/tbody>\u003c/table>\u003c/div>\u003cp>Para ver un cambio externo, borrá un archivo desde otra terminal mientras el visor corre. Sale en gris tenue.\u003c/p>","faq.how.q":"¿Cómo funciona?","faq.how.a":"\u003cp>Claude Code manda cada evento como un hook HTTP al servidor de \u003ccode>neu\u003c/code> en \u003ccode>127.0.0.1\u003c/code>. El servidor contesta en el acto con un \u003ccode>204\u003c/code> vacío, así Claude nunca lo espera, y después convierte el evento en rutas relativas al repo, lo manda a la página por un WebSocket y lo agrega a \u003ccode>.neurons/events.jsonl\u003c/code>. Un watcher del disco ve los cambios hechos por fuera de Claude y los marca como externos.\u003c/p>\u003cp>La \u003ca class=\"arch-link\" href=\"architecture.html\">página de arquitectura\u003c/a> lo explica paso a paso con diagramas animados.\u003c/p>","faq.os.q":"¿En qué sistemas operativos corre?","faq.os.a":"\u003cdiv class=\"table-wrap\">\u003ctable>\u003cthead>\u003ctr>\u003cth>Sistema\u003c/th>\u003cth>Estado\u003c/th>\u003cth>Notas\u003c/th>\u003c/tr>\u003c/thead>\u003ctbody>\u003ctr>\u003ctd>macOS\u003c/td>\u003ctd>\u003cspan class=\"status status-ok\">Verificado\u003c/span>\u003c/td>\u003ctd>Tests automáticos y sesiones reales de Claude Code en Apple Silicon (M4).\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Linux\u003c/td>\u003ctd>\u003cspan class=\"status status-mid\">Debería andar\u003c/span>\u003c/td>\u003ctd>La idea es correr los tests en Linux en CI, y eso todavía no se hizo. El watcher del disco vigila cada subcarpeta (también \u003ccode>node_modules\u003c/code> y \u003ccode>.git\u003c/code>) y puede chocar con el límite de inotify; si pasa, el visor te avisa y sigue con los eventos de Claude, sin cambios externos. Abrir el navegador con \u003ccode>xdg-open\u003c/code> no está probado.\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Windows\u003c/td>\u003ctd>\u003cspan class=\"status status-low\">Experimental\u003c/span>\u003c/td>\u003ctd>Está escrito para Windows pero nunca se corrió ahí. El manejo de rutas (letras de unidad, mayúsculas, rutas de Git Bash como \u003ccode>/c/...\u003c/code>) no se probó con payloads reales de Claude Code. Windows termina un proceso de golpe, así que \u003ccode>neu stop\u003c/code> hace la limpieza por su cuenta; si falla, corré \u003ccode>neu uninstall\u003c/code>. Las sesiones de Claude Code abiertas no se detectan al arrancar. La ruta de la configuración administrada no está verificada.\u003c/td>\u003c/tr>\u003c/tbody>\u003c/table>\u003c/div>","faq.lang.q":"¿Cómo cambio el idioma?","faq.lang.a":"\u003cp>En esta guía y en el visor, con los botones EN y ES de arriba; los dos recuerdan lo que elegiste. En la terminal, agregá \u003ccode>--lang en\u003c/code> o \u003ccode>--lang es\u003c/code>, o definí \u003ccode>NEURONS_LANG\u003c/code>. Sin ninguno de los dos, \u003ccode>neu\u003c/code> sigue el idioma del sistema.\u003c/p>","faq.publish.q":"¿Va a estar en npm o en Homebrew?","faq.publish.a":"\u003cp>Todavía no, y no hay fecha. Por ahora se instala desde el repositorio con \u003ccode>npm link\u003c/code>. El paquete ya está armado para npm (nombre \u003ccode>neurons-cli\u003c/code>, los dos comandos, solo se publica \u003ccode>dist/\u003c/code>), así que publicarlo más adelante dejaría la instalación en un solo \u003ccode>npm install -g neurons-cli\u003c/code>. Una fórmula de Homebrew podría venir después.\u003c/p>","footer.text":"Neurons 0.3.0 · licencia MIT","footer.arch":"Cómo funciona"}}</script>
+  <!-- i18n:embedded:end -->
+
+  <script>
+  (() => {
+    'use strict';
+    const LANG_KEY = 'neurons.lang';
+    const LANGS = ['en', 'es'];
+    const COPY_RESET_MS = 1600;
+
+    let dicts = {};
+    try { dicts = JSON.parse(document.getElementById('guide-i18n').textContent || '{}'); } catch { dicts = {}; }
+
+    function readStored() {
+      try { return localStorage.getItem(LANG_KEY); } catch { return null; }
+    }
+    function store(lang) {
+      try { localStorage.setItem(LANG_KEY, lang); } catch { /* private mode or blocked storage */ }
+    }
+    /** ?lang= > localStorage 'neurons.lang' > navigator.language starting with "es" > English. */
+    function detectLang() {
+      const asked = new URLSearchParams(location.search).get('lang');
+      if (asked && LANGS.includes(asked)) return asked;
+      const stored = readStored();
+      if (stored && LANGS.includes(stored)) return stored;
+      return String(navigator.language || '').toLowerCase().startsWith('es') ? 'es' : 'en';
+    }
+
+    let lang = detectLang();
+    const t = (key) => (dicts[lang] && dicts[lang][key]) ?? (dicts.en && dicts.en[key]) ?? key;
+
+    /** Served by the viewer at /help the architecture page is /architecture; from disk it is architecture.html. */
+    function archHref() {
+      if (location.protocol.startsWith('http') && /\/help$/.test(location.pathname)) {
+        return location.pathname.replace(/help$/, 'architecture');
+      }
+      return 'architecture.html';
+    }
+
+    async function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      if (!ok) throw new Error('copy failed');
+    }
+
+    /** Wraps every <pre> that has no copy button yet (answers are re-rendered on language change). */
+    function enhanceCode(root) {
+      for (const pre of root.querySelectorAll('pre')) {
+        let box = pre.parentElement;
+        if (!box.classList.contains('code')) {
+          box = document.createElement('div');
+          box.className = 'code';
+          pre.replaceWith(box);
+          box.appendChild(pre);
+        }
+        if (box.querySelector(':scope > .copy-btn')) continue;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'copy-btn';
+        btn.addEventListener('click', async () => {
+          try {
+            await copyText(pre.innerText.replace(/\n$/, ''));
+            btn.textContent = t('copy.done');
+          } catch {
+            const range = document.createRange();
+            range.selectNodeContents(pre);
+            const sel = getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            btn.textContent = t('copy.failed');
+          }
+          btn.classList.add('done');
+          clearTimeout(btn._reset);
+          btn._reset = setTimeout(() => {
+            btn.textContent = t('copy.button');
+            btn.classList.remove('done');
+          }, COPY_RESET_MS);
+        });
+        box.appendChild(btn);
+      }
+      for (const btn of root.querySelectorAll('.copy-btn')) {
+        if (!btn.classList.contains('done')) btn.textContent = t('copy.button');
+        btn.setAttribute('aria-label', t('copy.aria'));
+      }
+    }
+
+    /** Search text of each question: its question and answer in the current language, without markup. */
+    function indexFaq() {
+      const scratch = document.createElement('div');
+      for (const item of document.querySelectorAll('details.faq')) {
+        const q = item.querySelector('summary').dataset.i18n;
+        const a = item.querySelector('.answer').dataset.i18nHtml;
+        scratch.innerHTML = t(a);
+        item.dataset.search = fold(t(q) + ' ' + scratch.textContent);
+      }
+    }
+
+    /** Adds the "link to this answer" anchor at the end of every answer. */
+    function addAnswerLinks() {
+      for (const item of document.querySelectorAll('details.faq')) {
+        const answer = item.querySelector('.answer');
+        const a = document.createElement('a');
+        a.className = 'faq-link';
+        a.href = '#' + item.id;
+        a.textContent = t('faq.link');
+        answer.appendChild(a);
+      }
+    }
+
+    function apply() {
+      document.documentElement.lang = lang;
+      document.title = t('meta.title');
+      const desc = document.querySelector('meta[name="description"]');
+      if (desc) desc.setAttribute('content', t('meta.description'));
+      for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
+      for (const el of document.querySelectorAll('[data-i18n-html]')) el.innerHTML = t(el.dataset.i18nHtml);
+      for (const el of document.querySelectorAll('[data-i18n-attr]')) {
+        for (const pair of el.dataset.i18nAttr.split(';')) {
+          const [attr, key] = pair.split(':');
+          if (attr && key) el.setAttribute(attr.trim(), t(key.trim()));
+        }
+      }
+      for (const btn of document.querySelectorAll('[data-lang]')) {
+        btn.setAttribute('aria-pressed', String(btn.dataset.lang === lang));
+      }
+      const href = archHref();
+      for (const a of document.querySelectorAll('a.arch-link')) a.setAttribute('href', href);
+      indexFaq();
+      addAnswerLinks();
+      enhanceCode(document);
+      filterFaq();
+    }
+
+    function setLang(next) {
+      if (!LANGS.includes(next) || next === lang) return;
+      lang = next;
+      store(next);
+      const open = [...document.querySelectorAll('details.faq[open]')].map((d) => d.id);
+      apply();
+      for (const id of open) document.getElementById(id).open = true;
+    }
+
+    // FAQ search: every word of the query must appear in the question or its answer,
+    // ignoring case and accents.
+    const search = document.getElementById('faq-search');
+    const fold = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    function filterFaq() {
+      const words = fold(search.value).split(/\s+/).filter(Boolean);
+      let shown = 0;
+      for (const group of document.querySelectorAll('.faq-group')) {
+        let groupShown = 0;
+        for (const item of group.querySelectorAll('details.faq')) {
+          const text = item.dataset.search || '';
+          const match = words.every((w) => text.includes(w));
+          item.hidden = !match;
+          if (match) groupShown++;
+        }
+        group.hidden = groupShown === 0;
+        shown += groupShown;
+      }
+      document.getElementById('faq-empty').hidden = shown > 0;
+    }
+    search.addEventListener('input', filterFaq);
+
+    // Deep links: #faq-<id> opens that answer; opening an answer puts its id in the address.
+    function openFromHash(instant) {
+      const id = decodeURIComponent(location.hash.slice(1));
+      if (!id) return;
+      const target = document.getElementById(id);
+      if (!target || target.tagName !== 'DETAILS') return;
+      if (target.hidden) {
+        search.value = '';
+        filterFaq();
+      }
+      target.open = true;
+      target.scrollIntoView({ block: 'start', behavior: instant === true ? 'instant' : 'smooth' });
+    }
+    for (const item of document.querySelectorAll('details.faq')) {
+      item.addEventListener('toggle', () => {
+        if (item.open && location.hash !== '#' + item.id) history.replaceState(null, '', '#' + item.id);
+      });
+    }
+    window.addEventListener('hashchange', openFromHash);
+
+    for (const btn of document.querySelectorAll('[data-lang]')) {
+      btn.addEventListener('click', () => setLang(btn.dataset.lang));
+    }
+
+    apply();
+    openFromHash(true);
+
+    // Served over http (the viewer's /help, or /docs/guide.html), the JSON files are the
+    // source: load them and re-render only if they differ from the embedded copy.
+    if (location.protocol.startsWith('http')) {
+      Promise.all(LANGS.map((l) =>
+        fetch('i18n/guide.' + l + '.json', { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null)),
+      )).then((loaded) => {
+        if (!loaded.every((d) => d && typeof d === 'object' && !Array.isArray(d))) return;
+        const next = {};
+        LANGS.forEach((l, i) => { next[l] = loaded[i]; });
+        if (JSON.stringify(next) === JSON.stringify(dicts)) return;
+        const open = [...document.querySelectorAll('details.faq[open]')].map((d) => d.id);
+        dicts = next;
+        apply();
+        for (const id of open) document.getElementById(id).open = true;
+      }).catch(() => { /* keep the embedded copy */ });
+    }
+  })();
+  </script>
+</body>
+</html>
