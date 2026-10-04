@@ -139,12 +139,19 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
   const excluded = (rel: string): boolean =>
     rel === '' || isAlwaysExcluded(rel) || (excludeDefaults && isExcludedRel(rel));
 
+  // Windows delivers some notifications late: a last-write time change is reported when
+  // the cache is flushed, up to a second after it happened (ReadDirectoryChangesW docs).
+  // Such a stale sighting must not lend its time to a real change of the same path in the
+  // same batch (it would fall before the Bash window that made it), so there a path keeps
+  // its latest sighting. Elsewhere the first one: the batch spans at most coalesceMs.
+  const latestSighting = (opts.platform ?? process.platform) === 'win32';
+
   function onRaw(raw: string): void {
     const rel = toPosix(raw).replace(/^\.?\/+|\/+$/g, '');
     // A default-excluded path the index knows anyway (put there by a hook) must still be
     // able to leave it.
     if (excluded(rel) && !(rel !== '' && !isAlwaysExcluded(rel) && index.has(rel))) return;
-    if (!pending.has(rel)) pending.set(rel, Date.now());
+    if (latestSighting || !pending.has(rel)) pending.set(rel, Date.now());
     if (!timer) timer = setTimeout(schedule, coalesceMs);
   }
 

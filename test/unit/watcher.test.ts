@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -400,6 +401,47 @@ describe('startWatcher', () => {
     await sleep(250);
     expect(s.changes).toEqual([]);
   });
+});
+
+describe('time of a change', () => {
+  /** fs.watch stand-in for the native recursive mode: the test fires the raw events. */
+  function fakeWatch(): { watch: typeof fs.watch; fire: (name: string) => void } {
+    let listener: ((type: string, name: string) => void) | undefined;
+    const watch = ((_p: fs.PathLike, _o: unknown, cb: (type: string, name: string) => void) => {
+      listener = cb;
+      const w = new EventEmitter() as unknown as fs.FSWatcher;
+      w.close = () => {};
+      return w;
+    }) as unknown as typeof fs.watch;
+    return { watch, fire: (name) => listener?.('change', name) };
+  }
+
+  // Regression (Windows CI, flaky): a last-write notification that Windows delivered late
+  // landed in the same batch as the rename of that file and gave the move a time before the
+  // Bash window that made it, so the move was external and the hook repeated it.
+  for (const [platform, latest] of [['win32', true], ['darwin', false]] as const) {
+    it(`${platform}: a path seen twice in one batch takes its ${latest ? 'latest' : 'first'} sighting`, async () => {
+      const root = makeRepo({ 'a.txt': 'a' });
+      const index = new TreeIndex(await scanTree(root));
+      const changes: DiskChange[] = [];
+      const fake = fakeWatch();
+      handles.push(startWatcher({ root, index, onChange: (c) => changes.push(c), platform, watch: fake.watch, coalesceMs: 300 }));
+      const stale = Date.now();
+      fake.fire('a.txt'); // nothing changed yet: a late notification
+      await sleep(50);
+      const real = Date.now();
+      fs.writeFileSync(path.join(root, 'a.txt'), 'changed');
+      fake.fire('a.txt');
+      await waitFor(() => changes.length > 0);
+      expect(changes.map((c) => `${c.type}:${c.path}`)).toEqual(['change:a.txt']);
+      if (latest) {
+        expect(changes[0]!.ts).toBeGreaterThanOrEqual(real);
+      } else {
+        expect(changes[0]!.ts).toBeGreaterThanOrEqual(stale);
+        expect(changes[0]!.ts).toBeLessThan(real);
+      }
+    });
+  }
 });
 
 describe('watch mode selection (Linux: one non-recursive watch per indexed dir)', () => {

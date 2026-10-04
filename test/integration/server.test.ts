@@ -527,7 +527,8 @@ describe('one event per real file change (hook vs watcher)', () => {
     );
     await sleep(300);
     const lit = client.events().filter((e) => e.phase !== 'pre' && FILE_CHANGE.has(e.action));
-    expect(lit.map((e) => `${e.source}:${e.action}:${e.paths.join()}<${(e.fromPaths ?? []).join()}`)).toEqual(['watcher:move:docs/notes.md<docs/old.md']);
+    // On failure, the whole stream (times, attribution) says which side missed the other.
+    expect(lit.map((e) => `${e.source}:${e.action}:${e.paths.join()}<${(e.fromPaths ?? []).join()}`), JSON.stringify(client.events())).toEqual(['watcher:move:docs/notes.md<docs/old.md']);
     const tree = (await (await fetch(server.url + '/tree')).json()) as TreeSnapshot;
     expect(tree.entries.map((e) => e.path)).toContain('docs/notes.md');
     expect(tree.entries.map((e) => e.path)).not.toContain('docs/old.md');
