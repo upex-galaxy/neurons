@@ -28,7 +28,8 @@ const children: ChildProcess[] = [];
 let savedHome: string | undefined;
 
 function tmp(prefix: string): string {
-  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  // Native realpath, like the CLI: on Windows it also expands 8.3 short names (RUNNER~1).
+  const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   tmpDirs.push(d);
   return d;
 }

@@ -95,12 +95,13 @@ export function isOutsideId(id: string): boolean {
 }
 
 /**
- * Groups an absolute path outside the repo: ~/.claude, /tmp (also /private/tmp),
+ * Groups an absolute path outside the repo: ~/.claude (also C:/Users/<name>/.claude), /tmp (also /private/tmp),
  * otherwise its first two segments.
  */
 export function outsideGroup(abs: string): string {
   const p = abs.replace(/\\/g, '/');
-  if (/^(?:~|\/Users\/[^/]+|\/home\/[^/]+|\/root|__HOME__)\/\.claude(?:\/|$)/.test(p)) return '~/.claude';
+  // Windows homes come as C:/Users/<name> (outsideRepo uses "/" separators).
+  if (/^(?:~|(?:[A-Za-z]:)?\/Users\/[^/]+|\/home\/[^/]+|\/root|__HOME__)\/\.claude(?:\/|$)/.test(p)) return '~/.claude';
   if (/^(?:\/private)?\/tmp(?:\/|$)/.test(p)) return '/tmp';
   const segs = p.split('/').filter(Boolean);
   if (segs.length === 0) return '/';

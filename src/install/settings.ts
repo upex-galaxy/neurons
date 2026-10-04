@@ -1092,9 +1092,12 @@ export function lockStatus(raw: Buffer): LockInfo {
  */
 export function commandRunsScript(command: string, cmd: string): boolean {
   if (hasArgument(command, cmd)) return true;
-  if (!(BIN_NAMES as readonly string[]).includes(path.basename(cmd))) return false;
-  const dir = path.dirname(cmd);
-  return BIN_NAMES.some((name) => hasArgument(command, path.join(dir, name)));
+  const base = path.basename(cmd);
+  if (!(BIN_NAMES as readonly string[]).includes(base)) return false;
+  // The sibling keeps the separators of `cmd` as written: path.join would turn
+  // /opt/bin into \opt\bin on Windows, and the command line still says /opt/bin.
+  const dir = cmd.slice(0, cmd.length - base.length);
+  return BIN_NAMES.some((name) => hasArgument(command, dir + name));
 }
 
 /**

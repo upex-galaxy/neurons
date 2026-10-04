@@ -16,11 +16,12 @@ import {
   writesRedirect,
   type HookPayload,
 } from '../../src/server/normalize.ts';
-import { createPathResolver, splitWorktreeRel } from '../../src/server/paths.ts';
+import { createPathResolver, splitWorktreeRel, toPosix } from '../../src/server/paths.ts';
 import { TreeIndex, scanTree } from '../../src/server/tree.ts';
 import type { VizEvent } from '../../src/shared/types.ts';
 import { setLang } from '../../src/i18n.ts';
 import { emptyTally, snapshotTally, tallyEvent } from '../../web/src/tools.ts';
+import { rerootPayloadLine } from '../helpers/payloads.ts';
 
 // The injected-prompt labels asserted below are the Spanish ones.
 setLang('es');
@@ -59,13 +60,21 @@ afterAll(() => {
   for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
 });
 
+/**
+ * How outsideRepo spells an absolute path given in a payload: resolved against the repo
+ * (on Windows `/etc/hosts` is on the repo's drive, `C:/etc/hosts`) and with `/` separators.
+ */
+function outsideAbs(p: string): string {
+  return toPosix(path.resolve(repo, p));
+}
+
 function loadFixture(name: string, repoPath = repo): HookPayload[] {
   const raw = fs.readFileSync(path.join(FIXTURES, name), 'utf8');
   return raw
     .split('\n')
     .filter((l) => l.trim() !== '')
     .map((l) => {
-      const p = parseHookPayload(l.replaceAll('__REPO__', repoPath).replaceAll('__HOME__', FAKE_HOME));
+      const p = parseHookPayload(rerootPayloadLine(l, repoPath, FAKE_HOME));
       if (!p) throw new Error(`bad fixture line in ${name}`);
       return p;
     });
@@ -239,8 +248,8 @@ describe('Normalizer with real fixtures (run1)', () => {
 describe('Normalizer with real fixtures (run3)', () => {
   it('InstructionsLoaded outside the repo -> outsideRepo, no paths', async () => {
     const { perPayload } = await runFixture('run3.jsonl');
-    expect(main(perPayload[0] as VizEvent[])).toMatchObject({ action: 'context_load', paths: [], outsideRepo: [`${FAKE_HOME}/.claude/CLAUDE.md`], detail: 'session_start' });
-    expect(main(perPayload[1] as VizEvent[]).outsideRepo).toEqual([`${FAKE_HOME}/.claude/rules/context7.md`]);
+    expect(main(perPayload[0] as VizEvent[])).toMatchObject({ action: 'context_load', paths: [], outsideRepo: [outsideAbs(`${FAKE_HOME}/.claude/CLAUDE.md`)], detail: 'session_start' });
+    expect(main(perPayload[1] as VizEvent[]).outsideRepo).toEqual([outsideAbs(`${FAKE_HOME}/.claude/rules/context7.md`)]);
     expect(main(perPayload[2] as VizEvent[])).toMatchObject({ paths: ['CLAUDE.md'] });
     expect(main(perPayload[2] as VizEvent[]).outsideRepo).toBeUndefined();
   });
@@ -373,8 +382,8 @@ describe('Normalizer: other rules', () => {
     expect(run('mv -t src CLAUDE.md docs/old.md')).toMatchObject({ paths: ['src/CLAUDE.md', 'src/old.md'], fromPaths: ['CLAUDE.md', 'docs/old.md'] });
     expect(run('cd src && mv utils/legacy.ts api/')).toMatchObject({ paths: ['src/api/legacy.ts'], fromPaths: ['src/utils/legacy.ts'] });
     // Out of the repo: a delete; into it: a create.
-    expect(run('mv docs/old.md /tmp/elsewhere.md')).toMatchObject({ action: 'delete', paths: ['docs/old.md'], outsideRepo: ['/tmp/elsewhere.md'] });
-    expect(run('mv /tmp/in.md docs/in.md')).toMatchObject({ action: 'create', paths: ['docs/in.md'], outsideRepo: ['/tmp/in.md'] });
+    expect(run('mv docs/old.md /tmp/elsewhere.md')).toMatchObject({ action: 'delete', paths: ['docs/old.md'], outsideRepo: [outsideAbs('/tmp/elsewhere.md')] });
+    expect(run('mv /tmp/in.md docs/in.md')).toMatchObject({ action: 'create', paths: ['docs/in.md'], outsideRepo: [outsideAbs('/tmp/in.md')] });
     // The Post reuses the Pre decision (the tree may already show the new dir by then).
     expect(run('mv src/utils newdir', 'm1')).toMatchObject({ phase: 'pre', paths: ['newdir'], fromPaths: ['src/utils'] });
     expect(run('mv src/utils newdir', 'm1', 'PostToolUse')).toMatchObject({ phase: 'post', paths: ['newdir'], fromPaths: ['src/utils'] });
@@ -460,7 +469,7 @@ describe('Normalizer: other rules', () => {
 
   it('Read outside the repo -> outsideRepo', async () => {
     const { normalizer } = await makeNormalizer();
-    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '/etc/hosts' } })))).toMatchObject({ paths: [], outsideRepo: ['/etc/hosts'] });
+    expect(main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '/etc/hosts' } })))).toMatchObject({ paths: [], outsideRepo: [outsideAbs('/etc/hosts')] });
   });
 
   it('StopFailure, compaction, unknown events', async () => {
@@ -613,7 +622,7 @@ describe('Normalizer: Claude Code subagent worktrees', () => {
     const outside = path.join(os.tmpdir(), 'orca', 'workspaces', 'feature', 'src', 'api', 'user.ts');
     const e = main(normalizer.normalize(ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_use_id: 'w7', cwd: repo, tool_input: { file_path: outside } })));
     expect(e.paths).toEqual([]);
-    expect(e.outsideRepo).toEqual([outside]);
+    expect(e.outsideRepo).toEqual([toPosix(outside)]);
     expect(e.worktree).toBeUndefined();
   });
 });

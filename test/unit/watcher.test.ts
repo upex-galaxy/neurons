@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { DiskChange } from '../../src/server/attribution.ts';
 import { TreeIndex, isGitIgnored, scanTree } from '../../src/server/tree.ts';
-import { initialWatchDirs, startWatcher, usesNativeRecursive, type WatcherHandle } from '../../src/server/watcher.ts';
+import { FRESH_BIRTH_MS, initialWatchDirs, startWatcher, usesNativeRecursive, type WatcherHandle } from '../../src/server/watcher.ts';
 
 const tmpDirs: string[] = [];
 const handles: WatcherHandle[] = [];
@@ -34,7 +34,8 @@ function makeRepo(files: Record<string, string>, git = false, emptyDirs: string[
   }
   if (git) {
     execFileSync('git', ['init', '-q'], { cwd: dir });
-    execFileSync('git', ['add', '-A'], { cwd: dir });
+    // core.autocrlf off: Git for Windows would warn about LF -> CRLF for every file.
+    execFileSync('git', ['-c', 'core.autocrlf=false', 'add', '-A'], { cwd: dir });
   }
   return dir;
 }
@@ -106,10 +107,17 @@ async function waitFor(pred: () => boolean, timeout = 3000): Promise<void> {
 const has = (changes: DiskChange[], type: DiskChange['type'], p: string) =>
   changes.some((c) => c.type === type && c.path === p);
 
-/** Makes files look old: a rename keeps the birth time, a new file is born now (macOS moves birthtime back with mtime). */
-function age(root: string, ...rels: string[]): void {
+/**
+ * Makes entries look old: a rename keeps the birth time, a new file is born now. macOS moves
+ * the birth time back with the mtime; Linux (statx btime) and Windows (NTFS creation time)
+ * cannot be backdated, so there it waits until the entries are FRESH_BIRTH_MS old.
+ */
+async function age(root: string, ...rels: string[]): Promise<void> {
   const old = new Date(Date.now() - 60_000);
   for (const rel of rels) fs.utimesSync(path.join(root, rel), old, old);
+  const born = Math.max(...rels.map((rel) => fs.statSync(path.join(root, rel)).birthtimeMs));
+  const wait = born + FRESH_BIRTH_MS + 100 - Date.now();
+  if (wait > 0) await sleep(wait);
 }
 
 /** True when this volume ignores case (APFS default). */
@@ -200,7 +208,7 @@ describe('startWatcher', () => {
   // Regression (F5): the watcher never produced a move.
   it('reports a rename as one move with the old path in from', async () => {
     const s = await setup({ 'old.txt': 'o', 'keep.txt': 'k' });
-    age(s.root, 'old.txt');
+    await age(s.root, 'old.txt');
     fs.renameSync(path.join(s.root, 'old.txt'), path.join(s.root, 'new.txt'));
     await waitFor(() => has(s.changes, 'move', 'new.txt'));
     await sleep(300);
@@ -211,7 +219,7 @@ describe('startWatcher', () => {
 
   it('reports a moved file that keeps its name as a move', async () => {
     const s = await setup({ 'a/x.ts': 'x', 'b/keep.txt': 'k' });
-    age(s.root, 'a/x.ts');
+    await age(s.root, 'a/x.ts');
     fs.renameSync(path.join(s.root, 'a/x.ts'), path.join(s.root, 'b/x.ts'));
     await waitFor(() => has(s.changes, 'move', 'b/x.ts'));
     await sleep(300);
@@ -220,7 +228,7 @@ describe('startWatcher', () => {
 
   it('reports a dir rename as one moveDir, its contents quiet', async () => {
     const s = await setup({ 'src/a/one.ts': '1', 'src/keep.ts': 'k' });
-    age(s.root, 'src/a', 'src/a/one.ts');
+    await age(s.root, 'src/a', 'src/a/one.ts');
     fs.renameSync(path.join(s.root, 'src/a'), path.join(s.root, 'src/b'));
     await waitFor(() => has(s.changes, 'moveDir', 'src/b'));
     await sleep(300);
@@ -466,9 +474,13 @@ describe('watch mode selection (Linux: one non-recursive watch per indexed dir)'
     expect(spy.open()).toBe(0);
   });
 
-  it('on linux follows a renamed dir to its new path', async () => {
+  // The per-directory mode runs on Linux only. Simulated on Windows it holds a handle on
+  // old/ and old/sub/, and Windows refuses to rename a folder with open handles inside it
+  // (EPERM); the native recursive mode Windows really uses watches the root alone.
+  // docs/DECISIONS.md (W3).
+  it.skipIf(process.platform === 'win32')('on linux follows a renamed dir to its new path', async () => {
     const s = await setup({ 'a.txt': 'a', 'old/f.txt': 'f', 'old/sub/g.txt': 'g' }, { platform: 'linux' });
-    age(s.root, 'old', 'old/f.txt', 'old/sub', 'old/sub/g.txt');
+    await age(s.root, 'old', 'old/f.txt', 'old/sub', 'old/sub/g.txt');
     fs.renameSync(path.join(s.root, 'old'), path.join(s.root, 'new'));
     await waitFor(() => s.changes.some((c) => c.type === 'moveDir' && c.path === 'new'));
     fs.writeFileSync(path.join(s.root, 'new/sub/h.txt'), 'h');

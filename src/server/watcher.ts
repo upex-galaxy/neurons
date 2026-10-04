@@ -82,7 +82,7 @@ const MAX_DISCOVER_DIRS = 100_000;
 const IGNORE_BATCH = 500;
 const DEFAULT_PAIR_MS = 200;
 /** A renamed entry keeps its birth time; a new one is born when it is seen. */
-const FRESH_BIRTH_MS = 1000;
+export const FRESH_BIRTH_MS = 1000;
 const MAX_INODES = 50_000;
 
 function lstat(abs: string): fs.Stats | undefined {

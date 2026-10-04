@@ -34,7 +34,8 @@ describe('createPathResolver', () => {
   it('realpaths the root and relativizes inside paths', () => {
     const dir = mk(os.tmpdir());
     const r = createPathResolver(dir);
-    expect(r.root).toBe(fs.realpathSync(dir));
+    // The native realpath, as the resolver: on Windows it also expands 8.3 short names.
+    expect(r.root).toBe(fs.realpathSync.native(dir));
     expect(r.resolve(path.join(dir, 'src/a.ts'))).toEqual({ abs: path.join(r.root, 'src/a.ts'), rel: 'src/a.ts', inside: true });
     expect(r.resolve(dir)).toMatchObject({ rel: '', inside: true, abs: r.root });
     expect(r.resolve(r.root + '/')).toMatchObject({ rel: '', inside: true });
@@ -54,7 +55,7 @@ describe('createPathResolver', () => {
     const dir = mk(os.tmpdir());
     const r = createPathResolver(dir);
     expect(r.resolve('../other.txt')).toMatchObject({ inside: false });
-    expect(r.resolve(dir + '-sibling/x.ts')).toEqual({ abs: dir + '-sibling/x.ts', inside: false });
+    expect(r.resolve(dir + '-sibling/x.ts')).toEqual({ abs: path.resolve(dir + '-sibling/x.ts'), inside: false });
     expect(r.resolve('/etc/hosts').inside).toBe(false);
     expect(r.resolve('/etc/hosts').rel).toBeUndefined();
   });
@@ -116,6 +117,38 @@ describe('createPathResolver on Windows rules', () => {
     expect(fromMsysPath('/c')).toBe('C:\\');
     expect(fromMsysPath('/tmp/x')).toBe('/tmp/x');
     expect(fromMsysPath('/usr/bin')).toBe('/usr/bin');
+  });
+
+  // Regression (Windows CI): os.tmpdir() is C:\\Users\\RUNNER~1\\... while the realpath of the
+  // root is C:\\Users\\runneradmin\\...; payloads in the short spelling fell outside the repo.
+  it('8.3 short names: a path outside every alias is expanded through the realpath of its folders', () => {
+    const calls: string[] = [];
+    const longOf = (p: string): string => {
+      calls.push(p);
+      const m = /^c:\\users\\runner~1(\\appdata(\\[^\\]*)*)?$/i.exec(p);
+      if (!m) return p;
+      // Only folders exist: a file path (with an extension) has no realpath.
+      if (/\.[a-z]+$/i.test(p)) return p;
+      return 'C:\\Users\\runneradmin' + (m[1] ?? '');
+    };
+    const w = createPathResolver('C:\\Users\\runneradmin\\AppData\\repo', { platform: 'win32', realpath: longOf });
+    expect(w.root).toBe('C:\\Users\\runneradmin\\AppData\\repo');
+    expect(w.resolve('C:\\Users\\RUNNER~1\\AppData\\repo\\src\\new.ts')).toEqual({
+      abs: 'C:\\Users\\runneradmin\\AppData\\repo\\src\\new.ts',
+      rel: 'src/new.ts',
+      inside: true,
+    });
+    expect(w.resolve('a.ts', 'C:\\Users\\RUNNER~1\\AppData\\repo\\src')).toMatchObject({ rel: 'src/a.ts', inside: true });
+    expect(w.resolve('C:\\Users\\RUNNER~1\\AppData\\other\\x.ts')).toEqual({ abs: 'C:\\Users\\RUNNER~1\\AppData\\other\\x.ts', inside: false });
+    // A path without a short name never touches the disk; folders are looked up once.
+    calls.length = 0;
+    expect(w.resolve('C:\\elsewhere\\x.ts').inside).toBe(false);
+    expect(calls).toEqual([]);
+    w.resolve('C:\\Users\\RUNNER~1\\AppData\\repo\\src\\new.ts');
+    expect(calls).toEqual([]);
+    // Elsewhere a ~1 is just a character.
+    const p = createPathResolver('/home/me/repo', { platform: 'linux', realpath: longOf });
+    expect(p.resolve('/home/me/REPO~1/a.ts').inside).toBe(false);
   });
 
   it('POSIX rules stay case-sensitive', () => {

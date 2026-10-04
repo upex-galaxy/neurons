@@ -2,6 +2,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   HOOK_EVENTS,
@@ -35,7 +36,9 @@ import {
   userSettingsPath,
 } from '../../src/install/settings.ts';
 
-const SETTINGS_TS = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../src/install/settings.ts');
+const SETTINGS_TS = fileURLToPath(new URL('../../src/install/settings.ts', import.meta.url));
+/** POSIX permission bits: Windows ignores chmod on folders and reports no group/other bits. */
+const POSIX_MODES = process.platform !== 'win32';
 
 const tmpDirs: string[] = [];
 let cfgDir: string;
@@ -601,7 +604,9 @@ describe('enable / restore bashEditDiffEnabled', () => {
     for (const f of inRepo) expect(fs.readFileSync(path.join(repo, '.neurons', f), 'utf8')).not.toContain('ghp_secret_value');
     const dir = bashDiffStateDir();
     expect(dir.startsWith(cfgDir)).toBe(true);
-    for (const f of fs.readdirSync(dir)) expect(fs.statSync(path.join(dir, f)).mode & 0o077, f).toBe(0);
+    // Windows has no group/other bits to check (stat reports 0o666 for any writable file);
+    // there the files live under the user's own config dir, see docs/DECISIONS.md (W3).
+    if (POSIX_MODES) for (const f of fs.readdirSync(dir)) expect(fs.statSync(path.join(dir, f)).mode & 0o077, f).toBe(0);
     await restoreBashEditDiff({ repoRoot: repo });
     expect(fs.readFileSync(file, 'utf8')).toBe(original);
     expect(fs.existsSync(dir)).toBe(false);
@@ -739,7 +744,8 @@ describe('enable / restore bashEditDiffEnabled', () => {
     expect(readBashDiffState()).toBeNull();
   });
 
-  it('an unwritable config dir makes enable throw and leaves nothing behind', async () => {
+  // chmod 0o555 does not make a folder read-only on Windows (docs/DECISIONS.md, W3).
+  it.skipIf(!POSIX_MODES)('an unwritable config dir makes enable throw and leaves nothing behind', async () => {
     const repo = gitRepo();
     const file = path.join(cfgDir, 'settings.json');
     fs.writeFileSync(file, '{"a":1}');
@@ -946,7 +952,7 @@ describe('acquireLockSync', () => {
 
   it('any number of processes racing on a stale lock: exactly one owner', async () => {
     const racer = `
-      const { acquireLockSync } = await import(${JSON.stringify(SETTINGS_TS)});
+      const { acquireLockSync } = await import(${JSON.stringify(pathToFileURL(SETTINGS_TS).href)});
       const [repo, at] = process.argv.slice(1);
       while (Date.now() < Number(at)) {}
       const r = acquireLockSync(repo);

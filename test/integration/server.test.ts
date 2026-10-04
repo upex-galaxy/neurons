@@ -11,7 +11,9 @@ import { Normalizer, parseHookPayload, type HookPayload } from '../../src/server
 import { createPathResolver } from '../../src/server/paths.ts';
 import { allowedOriginSet, startNeuronsServer, type NeuronsServer, type NeuronsServerOptions } from '../../src/server/server.ts';
 import { TreeIndex, scanTree } from '../../src/server/tree.ts';
+import { FRESH_BIRTH_MS } from '../../src/server/watcher.ts';
 import type { LogLine, ServerMessage, TreeSnapshot, VizEvent } from '../../src/shared/types.ts';
+import { rerootPayloadLine } from '../helpers/payloads.ts';
 
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../fixtures/payloads');
 const FAKE_HOME = '/Users/fake-home';
@@ -67,7 +69,8 @@ function makeRepo(): string {
     fs.writeFileSync(path.join(repo, rel), content);
   }
   execFileSync('git', ['init', '-q'], { cwd: repo });
-  execFileSync('git', ['add', '-A'], { cwd: repo });
+  // core.autocrlf off: Git for Windows would warn about LF -> CRLF for every file.
+  execFileSync('git', ['-c', 'core.autocrlf=false', 'add', '-A'], { cwd: repo });
   return repo;
 }
 
@@ -76,7 +79,7 @@ function fixtureLines(name: string, repo: string): string[] {
     .readFileSync(path.join(FIXTURES, name), 'utf8')
     .split('\n')
     .filter((l) => l.trim() !== '')
-    .map((l) => l.replaceAll('__REPO__', repo).replaceAll('__HOME__', FAKE_HOME));
+    .map((l) => rerootPayloadLine(l, repo, FAKE_HOME));
 }
 
 function fixture(name: string, repo: string): HookPayload[] {
@@ -475,10 +478,17 @@ describe('one event per real file change (hook vs watcher)', () => {
     return repo;
   }
 
-  /** A rename keeps the birth time; the watcher uses it to tell a rename from a new file. */
-  function age(repo: string, ...rels: string[]): void {
+  /**
+   * A rename keeps the birth time; the watcher uses it to tell a rename from a new file.
+   * macOS moves the birth time back with the mtime; Linux and Windows cannot backdate it,
+   * so there it waits until the entries are FRESH_BIRTH_MS old.
+   */
+  async function age(repo: string, ...rels: string[]): Promise<void> {
     const old = new Date(Date.now() - 60_000);
     for (const rel of rels) fs.utimesSync(path.join(repo, rel), old, old);
+    const born = Math.max(...rels.map((rel) => fs.statSync(path.join(repo, rel)).birthtimeMs));
+    const wait = born + FRESH_BIRTH_MS + 100 - Date.now();
+    if (wait > 0) await sleep(wait);
   }
 
   // Regression (F1 case 1): `echo hi > new.txt && sleep 3` with bashEditDiff lit new.txt twice,
@@ -502,7 +512,7 @@ describe('one event per real file change (hook vs watcher)', () => {
   it('git mv with the watcher first: one move', async () => {
     const { repo, server } = await start();
     const client = await connect(server.url);
-    age(repo, 'docs/old.md');
+    await age(repo, 'docs/old.md');
     const real = fs.realpathSync(repo);
     const cmd = 'git mv docs/old.md docs/notes.md && npm test';
     await post(server.url, bash(repo, 'PreToolUse', 'm1', cmd));
@@ -571,7 +581,7 @@ describe('one event per real file change (hook vs watcher)', () => {
   it('mv without bashEditDiff: one move whatever the order', async () => {
     const { repo, server } = await start();
     const client = await connect(server.url);
-    age(repo, 'src/api/order.ts');
+    await age(repo, 'src/api/order.ts');
     await post(server.url, bash(repo, 'PreToolUse', 'v1', 'mv src/api/order.ts src/api/orders.ts'));
     fs.renameSync(path.join(repo, 'src/api/order.ts'), path.join(repo, 'src/api/orders.ts'));
     await post(server.url, bash(repo, 'PostToolUse', 'v1', 'mv src/api/order.ts src/api/orders.ts', { tool_response: { stdout: '' } }));
@@ -585,7 +595,7 @@ describe('one event per real file change (hook vs watcher)', () => {
   it('an external dir rename is one external move', async () => {
     const { repo, server } = await start();
     const client = await connect(server.url);
-    age(repo, 'src/api', 'src/api/user.ts', 'src/api/order.ts');
+    await age(repo, 'src/api', 'src/api/user.ts', 'src/api/order.ts');
     fs.renameSync(path.join(repo, 'src/api'), path.join(repo, 'src/routes'));
     await waitFor(() => client.events().length > 0, 3000, 'external move');
     await sleep(400);

@@ -79,6 +79,10 @@ export function fromMsysPath(p: string): string {
   return `${(m[1] as string).toUpperCase()}:${(m[2] as string) === '' ? '\\' : (m[2] as string).replace(/\//g, '\\')}`;
 }
 
+/** A `~<digit>` in a Windows path: maybe an 8.3 short name (PROGRA~1). */
+const SHORT_NAME_RE = /~\d/;
+const SHORT_NAME_CACHE_MAX = 1000;
+
 function safeRealpath(p: string): string {
   try {
     return fs.realpathSync.native(p);
@@ -90,7 +94,10 @@ function safeRealpath(p: string): string {
 export interface PathResolverOptions {
   /** Path rules to follow (default: this process's). Tests pass 'win32' on any OS. */
   platform?: NodeJS.Platform;
-  /** Realpath of the root (default: fs.realpathSync.native, falling back to the path as given). */
+  /**
+   * Realpath of the root, and on Windows of the folders of a path with an 8.3 short name
+   * (default: fs.realpathSync.native, falling back to the path as given).
+   */
   realpath?: (p: string) => string;
 }
 
@@ -104,7 +111,8 @@ export function createPathResolver(root: string, opts: PathResolverOptions = {})
   const win = platform === 'win32';
   const P = platform === process.platform ? path : win ? path.win32 : path.posix;
   const rawRoot = P.resolve(win ? fromMsysPath(root) : root);
-  const realRoot = (opts.realpath ?? safeRealpath)(rawRoot);
+  const realpath = opts.realpath ?? safeRealpath;
+  const realRoot = realpath(rawRoot);
   const aliases = new Set<string>();
   for (const r of [realRoot, rawRoot]) for (const v of win ? [r] : privateVariants(r)) aliases.add(v);
   // Longest first so a nested alias never shadows a longer one.
@@ -126,12 +134,40 @@ export function createPathResolver(root: string, opts: PathResolverOptions = {})
 
   const prepare = (p: string): string => expandHome(win ? fromMsysPath(p) : p, P);
 
+  // Windows: a path can spell a folder by its 8.3 short name (C:\Users\RUNNER~1 for
+  // C:\Users\runneradmin; %TEMP% often comes that way), which no alias of the root matches.
+  // Such a path that falls outside is expanded through the realpath of its deepest
+  // existing ancestor and tried again. Only paths with a `~<digit>` segment pay a disk
+  // access, once per ancestor (cached).
+  const longDirs = new Map<string, string>();
+  function expandShortNames(abs: string): string | undefined {
+    if (!win || !SHORT_NAME_RE.test(abs)) return undefined;
+    let dir = abs;
+    for (;;) {
+      const key = fold(dir);
+      let long = longDirs.get(key);
+      if (long === undefined) {
+        long = realpath(dir);
+        if (longDirs.size >= SHORT_NAME_CACHE_MAX) longDirs.clear();
+        longDirs.set(key, long);
+      }
+      if (fold(long) !== key) return dir === abs ? long : P.join(long, P.relative(dir, abs));
+      const parent = P.dirname(dir);
+      if (parent === dir || !SHORT_NAME_RE.test(parent)) return undefined;
+      dir = parent;
+    }
+  }
+
   return {
     root: realRoot,
     resolve(p: string, cwd?: string): ResolvedPath {
       const base = cwd ? P.resolve(realRoot, prepare(cwd)) : realRoot;
       const abs = P.resolve(base, prepare(p));
-      const rel = toRootRel(abs);
+      let rel = toRootRel(abs);
+      if (rel === undefined) {
+        const long = expandShortNames(abs);
+        if (long !== undefined) rel = toRootRel(long);
+      }
       if (rel === undefined) return { abs, inside: false };
       const canonical = rel === '' ? realRoot : P.join(realRoot, rel);
       return { abs: canonical, rel, inside: true };
