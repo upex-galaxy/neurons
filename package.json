@@ -9,6 +9,7 @@
     "neurons": "./dist/cli.mjs"
   },
   "files": [
+    "LICENSE",
     "dist"
   ],
   "engines": {
@@ -41,5 +42,13 @@
     "typescript": "^7.0.2",
     "vite": "^8.3.1",
     "vitest": "^5.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/upex-galaxy/neurons.git"
+  },
+  "homepage": "https://github.com/upex-galaxy/neurons#readme",
+  "bugs": {
+    "url": "https://github.com/upex-galaxy/neurons/issues"
   }
 }

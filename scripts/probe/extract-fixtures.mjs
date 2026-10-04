@@ -13,7 +13,15 @@ if (!runFile || !repoRoot || !outDir || !name) {
 }
 const root = fs.realpathSync(repoRoot);
 const home = os.homedir();
-const scrub = (s) => s.split(root).join('__REPO__').split(home).join('__HOME__');
+// Claude Code names transcript folders after the absolute cwd with "/" and "." turned into
+// "-", so the encoded root and home leak the user name unless they are replaced too.
+const encode = (p) => p.replace(/[/.]/g, '-');
+const scrub = (s) =>
+  s
+    .split(root).join('__REPO__')
+    .split(encode(root)).join('-__REPO__')
+    .split(home).join('__HOME__')
+    .split(encode(home)).join('-__HOME__');
 
 const lines = fs.readFileSync(runFile, 'utf8').trim().split('\n');
 const bodies = lines.map((l) => JSON.parse(scrub(l)).body);
