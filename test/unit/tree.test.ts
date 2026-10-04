@@ -109,7 +109,7 @@ describe('scanTree (not a git repo)', () => {
     const dir = mkRepo(['b.txt', 'src/a.ts', 'src/utils/x.ts', 'node_modules/p/i.js', 'dist/o.js', 'build/o.js', '.neurons/e.jsonl', '.repo-synapse/e.jsonl', '.claude/rules/api.md']);
     fs.mkdirSync(path.join(dir, 'empty'));
     const snap = await scanTree(dir);
-    expect(snap.root).toBe(fs.realpathSync(dir));
+    expect(snap.root).toBe(fs.realpathSync.native(dir));
     expect(snap.name).toBe(path.basename(dir));
     expect(snap.truncated).toBe(false);
     expect(paths(snap)).toEqual([

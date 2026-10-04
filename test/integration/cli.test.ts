@@ -7,13 +7,27 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { HOOK_EVENTS, hookUrl, isLegacyHook, isOwnHook, mergeHooks } from '../../src/install/settings.ts';
+import { rerootPayloadLine } from '../helpers/payloads.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = path.join(ROOT, 'dist', 'cli.mjs');
 const FIXTURE = path.join(ROOT, 'test', 'fixtures', 'payloads', 'run1.jsonl');
+
+/**
+ * Windows: a child process gets no catchable signal (ChildProcess.kill and process.kill are
+ * TerminateProcess there), so a viewer is closed with `neu stop`, which terminates it and
+ * does its cleanup in its place (docs/DECISIONS.md, W2).
+ */
+const WIN = process.platform === 'win32';
+/**
+ * How long a run may take to print what a test waits for. A start reads its own command
+ * line from WMI through PowerShell, and the first PowerShell of a Windows CI runner has
+ * taken over 10 s to come up.
+ */
+const WAIT_MS = WIN ? 30_000 : 10_000;
 
 const tmpDirs: string[] = [];
 const children: ChildProcess[] = [];
@@ -22,7 +36,8 @@ let xdgDir: string;
 let neuronsHome: string;
 
 function tmp(prefix: string): string {
-  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  // Native realpath, like the CLI: on Windows it also expands 8.3 short names (RUNNER~1).
+  const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   tmpDirs.push(d);
   return d;
 }
@@ -39,7 +54,7 @@ function newestMtime(dir: string): number {
 beforeAll(() => {
   const built = fs.statSync(CLI, { throwIfNoEntry: false });
   if (!built || built.mtimeMs < newestMtime(path.join(ROOT, 'src'))) {
-    execFileSync(path.join(ROOT, 'node_modules', '.bin', 'tsdown'), [], { cwd: ROOT, stdio: 'ignore' });
+    execFileSync(path.join(ROOT, 'node_modules', '.bin', WIN ? 'tsdown.cmd' : 'tsdown'), [], { cwd: ROOT, stdio: 'ignore', shell: WIN });
   }
   xdgDir = tmp('rs-cli-xdg-');
   neuronsHome = tmp('rs-cli-nhome-');
@@ -82,8 +97,15 @@ interface Run {
 
 /** `script`: the CLI path as given to node (default: the absolute dist/cli.mjs). */
 function run(args: string[], cfgDir: string, o: { cwd?: string; env?: NodeJS.ProcessEnv; script?: string } = {}): Run {
+  const inherited: NodeJS.ProcessEnv = { ...process.env };
+  // Windows ignores the case of variable names: an override replaces the inherited spelling
+  // (ComSpec vs COMSPEC), or the child could keep the inherited value.
+  if (WIN) {
+    const overrides = new Set(Object.keys(o.env ?? {}).map((k) => k.toUpperCase()));
+    for (const k of Object.keys(inherited)) if (overrides.has(k.toUpperCase())) delete inherited[k];
+  }
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...inherited,
     CLAUDE_CONFIG_DIR: cfgDir,
     NEURONS_HOME: neuronsHome,
     GIT_CONFIG_GLOBAL: '/dev/null',
@@ -113,7 +135,7 @@ function run(args: string[], cfgDir: string, o: { cwd?: string; env?: NodeJS.Pro
     child,
     output: () => buf,
     exited,
-    waitFor(re, ms = 10_000) {
+    waitFor(re, ms = WAIT_MS) {
       return new Promise((resolve, reject) => {
         const check = () => {
           const m = buf.match(re);
@@ -138,9 +160,46 @@ function run(args: string[], cfgDir: string, o: { cwd?: string; env?: NodeJS.Pro
   };
 }
 
+/**
+ * Closes a running viewer the way its user would. macOS and Linux: the signal; the viewer
+ * cleans up itself and exits 0. Windows: `neu stop <repo>` (see WIN).
+ */
+async function closeViewer(r: Run, repo: string, cfg: string, o: { signal?: NodeJS.Signals; env?: NodeJS.ProcessEnv } = {}): Promise<void> {
+  if (!WIN) {
+    r.child.kill(o.signal ?? 'SIGINT');
+    expect((await r.exited).code).toBe(0);
+    return;
+  }
+  const stop = run(['stop', repo], cfg, o.env ? { env: o.env } : {});
+  const { code } = await stop.exited;
+  expect(stop.output()).toContain(stoppedMessage(r.child.pid));
+  expect(code).toBe(0);
+  await r.exited;
+}
+
+/** What `neu stop` prints for a viewer it closed: on Windows it terminated it and cleaned up. */
+function stoppedMessage(pid: number | undefined): string {
+  return WIN ? `(PID ${pid}) terminado` : `(PID ${pid}) cerrado.`;
+}
+
+/** The exit of a viewer closed by `neu stop`: 0 from its own cleanup, except on Windows (terminated). */
+function expectStoppedExit(exit: { code: number | null }): void {
+  if (!WIN) expect(exit.code).toBe(0);
+}
+
+/**
+ * A repo as `ls` and `open` list it: under the home directory as `~/...`. The temp dir is
+ * under the home on Windows (AppData\Local\Temp), not on macOS or Linux.
+ */
+function shown(p: string): string {
+  const home = os.homedir();
+  if (p === home) return '~';
+  return p.startsWith(home + path.sep) ? `~${p.slice(home.length)}` : p;
+}
+
 function firstFixture(repo: string): string {
   const line = fs.readFileSync(FIXTURE, 'utf8').split('\n').find((l) => l.trim() !== '');
-  return (line ?? '{}').replaceAll('__REPO__', repo).replaceAll('__HOME__', '/Users/fake-home');
+  return rerootPayloadLine(line ?? '{}', repo, '/Users/fake-home');
 }
 
 function ownUrls(file: string): Array<{ event: string; url: string }> {
@@ -209,9 +268,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     expect(res.status).toBe(204);
     expect(await res.text()).toBe('');
 
-    r.child.kill('SIGINT');
-    const { code } = await r.exited;
-    expect(code).toBe(0);
+    await closeViewer(r, repo, cfg);
     expect(fs.existsSync(settings)).toBe(false);
     expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
     expect(fs.existsSync(path.join(repo, '.neurons', 'lock'))).toBe(false);
@@ -235,9 +292,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     expect(JSON.parse(fs.readFileSync(userFile, 'utf8'))).toEqual({ theme: 'light', model: 'opus', bashEditDiffEnabled: true });
     expect(ownUrls(localFile).every((o) => o.url === hookUrl(Number(m[1])))).toBe(true);
 
-    r.child.kill('SIGTERM');
-    const { code } = await r.exited;
-    expect(code).toBe(0);
+    await closeViewer(r, repo, cfg, { signal: 'SIGTERM' });
     expect(fs.readFileSync(userFile, 'utf8')).toBe(userOriginal);
     expect(fs.readFileSync(localFile, 'utf8')).toBe(localOriginal);
   });
@@ -255,8 +310,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     expect(fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain('/.neurons/');
     const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: repo, encoding: 'utf8' });
     expect(status).not.toContain('.neurons');
-    r.child.kill('SIGINT');
-    expect((await r.exited).code).toBe(0);
+    await closeViewer(r, repo, cfg);
   });
 
   it('a read-only .git/info/exclude does not abort start nor leave hooks behind', async () => {
@@ -269,8 +323,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
       await r.waitFor(READY);
       expect(r.output()).toContain('.git/info/exclude');
       expect(ownUrls(path.join(repo, '.claude', 'settings.local.json'))).toHaveLength(HOOK_EVENTS.length);
-      r.child.kill('SIGINT');
-      expect((await r.exited).code).toBe(0);
+      await closeViewer(r, repo, cfg);
       expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
       expect(fs.existsSync(path.join(repo, '.neurons', 'install.json'))).toBe(false);
     } finally {
@@ -278,7 +331,8 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     }
   });
 
-  it('an install that throws after writing the manifest is undone on exit', async () => {
+  // chmod 0o555 does not make a folder read-only on Windows (docs/DECISIONS.md, W3).
+  it.skipIf(WIN)('an install that throws after writing the manifest is undone on exit', async () => {
     const repo = gitRepo();
     const cfg = tmp('rs-cli-cfg-');
     const claudeDir = path.join(repo, '.claude');
@@ -299,7 +353,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     expect(fs.existsSync(path.join(repo, '.neurons', 'lock'))).toBe(false);
   });
 
-  it('an unwritable user config dir skips bash diff instead of aborting start', async () => {
+  it.skipIf(WIN)('an unwritable user config dir skips bash diff instead of aborting start', async () => {
     const repo = gitRepo();
     const cfg = tmp('rs-cli-cfg-');
     const userFile = path.join(cfg, 'settings.json');
@@ -330,11 +384,9 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     const rb = run(['start', b, '--no-open', '--port', '0'], cfg);
     await rb.waitFor(READY);
     expect(rb.output()).toContain('otro visor');
-    ra.child.kill('SIGINT');
-    expect((await ra.exited).code).toBe(0);
+    await closeViewer(ra, a, cfg);
     expect(JSON.parse(fs.readFileSync(userFile, 'utf8'))).toEqual({ a: 1, bashEditDiffEnabled: true });
-    rb.child.kill('SIGINT');
-    expect((await rb.exited).code).toBe(0);
+    await closeViewer(rb, b, cfg);
     expect(fs.readFileSync(userFile, 'utf8')).toBe('{"a":1}');
     expect(fs.readdirSync(cfg)).toEqual(['settings.json']);
   });
@@ -348,8 +400,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     const res = await second.exited;
     expect(res.code).toBe(1);
     expect(second.output()).toContain('Ya hay un visor de Neurons corriendo');
-    first.child.kill('SIGINT');
-    expect((await first.exited).code).toBe(0);
+    await closeViewer(first, repo, cfg);
 
     // Stale lock + leftovers of a crashed run.
     fs.writeFileSync(path.join(repo, '.neurons', 'lock'), JSON.stringify({ pid: 2 ** 22 + 4321 }));
@@ -362,8 +413,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     const own = ownUrls(path.join(repo, '.claude', 'settings.local.json'));
     expect(own).toHaveLength(HOOK_EVENTS.length);
     expect(own.every((o) => o.url === hookUrl(Number(m[1])))).toBe(true);
-    third.child.kill('SIGINT');
-    expect((await third.exited).code).toBe(0);
+    await closeViewer(third, repo, cfg);
     expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
   });
 
@@ -386,8 +436,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     await r.waitFor(READY);
     expect(r.output()).toContain('lock viejo');
     expect(JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid).toBe(r.child.pid);
-    r.child.kill('SIGINT');
-    expect((await r.exited).code).toBe(0);
+    await closeViewer(r, repo, cfg);
     expect(fs.readdirSync(path.join(repo, '.neurons')).filter((f) => f.startsWith('lock'))).toEqual([]);
   });
 
@@ -400,8 +449,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     expect((await second.exited).code).toBe(1);
     expect(second.output()).toContain('Ya hay un visor de Neurons corriendo');
     expect(second.output()).toContain(`borrá ${path.join(repo, '.neurons', 'lock')}`);
-    first.child.kill('SIGINT');
-    expect((await first.exited).code).toBe(0);
+    await closeViewer(first, repo, cfg);
   });
 
   it('several starts racing on a stale lock: exactly one takes it over (F8)', async () => {
@@ -431,8 +479,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
       expect(JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid).toBe(winner.child.pid);
       const port = Number(winner.output().match(READY)![1]);
       expect(ownUrls(path.join(repo, '.claude', 'settings.local.json')).every((o) => o.url === hookUrl(port))).toBe(true);
-      winner.child.kill('SIGINT');
-      expect((await winner.exited).code).toBe(0);
+      await closeViewer(winner, repo, cfg);
       expect(fs.existsSync(path.join(repo, '.claude'))).toBe(false);
       expect(fs.readdirSync(path.join(repo, '.neurons')).filter((f) => f.startsWith('lock'))).toEqual([]);
     }
@@ -455,8 +502,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     expect(fs.readFileSync(manifest, 'utf8')).toBe(manifestBefore);
     expect(ownUrls(settings).every((o) => o.url === hookUrl(port))).toBe(true);
 
-    r.child.kill('SIGINT');
-    expect((await r.exited).code).toBe(0);
+    await closeViewer(r, repo, cfg);
   });
 
   // Regression (F9 follow-up): with a live `start --no-install`, install refused and claimed
@@ -471,8 +517,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     const settings = path.join(repo, '.claude', 'settings.local.json');
     expect(ownUrls(settings).length).toBeGreaterThan(0);
     expect(ownUrls(settings).every((o) => o.url === hookUrl(7))).toBe(true);
-    r.child.kill('SIGINT');
-    expect((await r.exited).code).toBe(0);
+    await closeViewer(r, repo, cfg);
     // The hooks were installed by hand, so they outlive the viewer.
     expect(ownUrls(settings).every((o) => o.url === hookUrl(7))).toBe(true);
     const un = run(['uninstall', repo], cfg);
@@ -506,8 +551,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     expect(ownUrls(settings).every((o) => o.url === hookUrl(port))).toBe(true);
     expect(fs.existsSync(path.join(repo, '.repo-synapse', 'install.json'))).toBe(false);
     expect(fs.readFileSync(path.join(repo, '.neurons', 'settings.local.json.bak'), 'utf8')).toBe(original);
-    r.child.kill('SIGINT');
-    expect((await r.exited).code).toBe(0);
+    await closeViewer(r, repo, cfg);
     expect(fs.readFileSync(settings, 'utf8')).toBe(original);
     expect(fs.readFileSync(legacyLog, 'utf8')).toBe('{"kind":"tree"}\n');
   });
@@ -545,8 +589,7 @@ describe('Neurons CLI (dist/cli.mjs)', () => {
     const cfg = tmp('rs-cli-cfg-');
     const rec = run(['start', repo, '--no-open', '--port', '0', '--no-install', '--no-bash-diff'], cfg);
     await rec.waitFor(READY);
-    rec.child.kill('SIGINT');
-    expect((await rec.exited).code).toBe(0);
+    await closeViewer(rec, repo, cfg);
     const log = fs.readFileSync(path.join(repo, '.neurons', 'events.jsonl'));
 
     const replay = async (expected: string) => {
@@ -634,16 +677,15 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     expect(ls.code).toBe(0);
     const [header, row] = ls.out.trim().split('\n');
     expect(header).toMatch(/^Repositorio\s+Puerto\s+URL\s+PID\s+Desde$/);
-    expect(row).toContain(repo);
+    expect(row).toContain(shown(repo));
     expect(row).toContain(`http://127.0.0.1:${port}`);
     expect(row).toMatch(new RegExp(`\\s${port}\\s.*\\s${r.child.pid}\\s+\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d$`));
 
     const stop = await finished(run(['stop'], cfg, { cwd: sub, env }));
     expect(stop.code).toBe(0);
     expect(stop.out).toContain(`Usando la raíz del repositorio: ${repo}`);
-    expect(stop.out).toContain(`(PID ${r.child.pid}) cerrado.`);
-    const exit = await r.exited;
-    expect(exit.code).toBe(0);
+    expect(stop.out).toContain(stoppedMessage(r.child.pid));
+    expectStoppedExit(await r.exited);
     expect(fs.readFileSync(localFile, 'utf8')).toBe(localOriginal);
     expect(fs.existsSync(path.join(repo, '.neurons', 'lock'))).toBe(false);
     expect(registryFiles(env.NEURONS_HOME)).toEqual([]);
@@ -667,7 +709,7 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     expect(r.output()).not.toContain('Usando la raíz');
     const stop = await finished(run(['stop', dir], cfg, { env }));
     expect(stop.code).toBe(0);
-    expect((await r.exited).code).toBe(0);
+    expectStoppedExit(await r.exited);
   });
 
   it('help, an unknown command and an unknown directory', async () => {
@@ -724,10 +766,23 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     // A fake opener first in PATH records the URL instead of opening a browser.
     const bin = tmp('rs-cli-bin-');
     const log = path.join(bin, 'opened.log');
-    for (const name of ['open', 'xdg-open']) {
-      fs.writeFileSync(path.join(bin, name), `#!/bin/sh\necho "$@" >> "${log}"\n`, { mode: 0o755 });
+    let env: NodeJS.ProcessEnv & { NEURONS_HOME: string };
+    if (WIN) {
+      // Windows opens it with `%ComSpec% /d /s /c start "" "<url>"` (verbatim arguments). In
+      // its place node.exe, whose preload records the last argument (the URL) and exits
+      // before node looks for a script called "/d". Other node processes ignore the preload.
+      const preload = path.join(bin, 'fake-start.mjs');
+      fs.writeFileSync(
+        preload,
+        `import fs from 'node:fs';\nconst a = process.argv.slice(2);\nif (a[0] === '/s' && a[1] === '/c') {\n  fs.appendFileSync(${JSON.stringify(log)}, a.at(-1) + '\\n');\n  process.exit(0);\n}\n`,
+      );
+      env = { ...homeEnv(), ComSpec: process.execPath, NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` };
+    } else {
+      for (const name of ['open', 'xdg-open']) {
+        fs.writeFileSync(path.join(bin, name), `#!/bin/sh\necho "$@" >> "${log}"\n`, { mode: 0o755 });
+      }
+      env = { ...homeEnv(), PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` };
     }
-    const env = { ...homeEnv(), PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` };
     const localFile = path.join(a, '.claude', 'settings.local.json');
 
     const ra = run([a, '--no-open', '--no-bash-diff', '--port', '0'], cfg, { env });
@@ -741,8 +796,8 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     const several = await finished(run(['open'], cfg, { env }));
     expect(several.code).toBe(1);
     expect(several.out).toContain('Hay varios visores corriendo:');
-    expect(several.out).toContain(a);
-    expect(several.out).toContain(b);
+    expect(several.out).toContain(shown(a));
+    expect(several.out).toContain(shown(b));
     expect(several.out).toContain('neu open <repo>');
 
     // Without a repo, the viewer of the repo you are in wins (like `stop`).
@@ -760,8 +815,8 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     const all = await finished(run(['stop', '--all'], cfg, { env }));
     expect(all.code).toBe(0);
     expect(all.out).toContain('Cerrando 2 visores...');
-    expect((await ra.exited).code).toBe(0);
-    expect((await rb.exited).code).toBe(0);
+    expectStoppedExit(await ra.exited);
+    expectStoppedExit(await rb.exited);
     expect(fs.existsSync(localFile)).toBe(false);
     expect(registryFiles(env.NEURONS_HOME)).toEqual([]);
     expect((await finished(run(['stop', '--all'], cfg, { env }))).out.trim()).toBe('No hay visores corriendo.');
@@ -803,9 +858,9 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     expect(entry.cmd).toBe(CLI);
     expect(String(entry.command)).toContain(` ${path.relative(ROOT, CLI)} start `);
     const stop = await finished(run(['stop', repo], cfg, { env }));
-    expect(stop.out).toContain(`(PID ${r.child.pid}) cerrado.`);
+    expect(stop.out).toContain(stoppedMessage(r.child.pid));
     expect(stop.code).toBe(0);
-    expect((await r.exited).code).toBe(0);
+    expectStoppedExit(await r.exited);
   });
 
   it('stop never signals the viewer of another repo through a stale lock whose PID it reused (F2)', async () => {
@@ -827,10 +882,13 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
     expect(rb.child.signalCode).toBeNull();
     const stopB = await finished(run(['stop', b], cfg, { env }));
     expect(stopB.code).toBe(0);
-    expect((await rb.exited).code).toBe(0);
+    expectStoppedExit(await rb.exited);
   });
 
-  it('stop reports a viewer that does not exit; --force kills it and restores both settings files', async () => {
+  // A hung viewer is a stopped process (SIGSTOP), which Windows does not have; there `neu stop`
+  // always terminates (TerminateProcess cannot be ignored) and the cleanup it then does is
+  // what every closeViewer above checks (docs/DECISIONS.md, W3).
+  it.skipIf(WIN)('stop reports a viewer that does not exit; --force kills it and restores both settings files', async () => {
     const repo = gitRepo();
     const cfg = tmp('rs-cli-cfg-');
     const env = homeEnv();

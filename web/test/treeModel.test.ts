@@ -150,6 +150,8 @@ describe('satellites', () => {
     const { outsideGroup } = await import('../src/treeModel.ts');
     expect(outsideGroup('/Users/alex/.claude/skills/x/SKILL.md')).toBe('~/.claude');
     expect(outsideGroup('/home/u/.claude/CLAUDE.md')).toBe('~/.claude');
+    expect(outsideGroup('C:/Users/alex/.claude/CLAUDE.md')).toBe('~/.claude');
+    expect(outsideGroup('c:\\Users\\alex\\.claude\\rules\\a.md')).toBe('~/.claude');
     expect(outsideGroup('/tmp/a/b.log')).toBe('/tmp');
     expect(outsideGroup('/private/tmp/c.json')).toBe('/tmp');
     expect(outsideGroup('/opt/homebrew/lib/x')).toBe('/opt/homebrew');

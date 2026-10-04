@@ -292,7 +292,7 @@ async function cmdStart(positionals: string[], o: Options): Promise<number> {
     if (server.watcherError) err(t('start.watcherFailed', { error: server.watcherError }));
     if (o.port !== 0 && server.port !== o.port) out(t('start.portBusy', { port: o.port, actual: server.port }));
     try {
-      writeViewerEntry({ repo, port: server.port, url: server.url });
+      writeViewerEntry({ repo, port: server.port, url: server.url, installs: o.install });
       registered = true;
     } catch (e) {
       err(t('start.registryFailed', { error: (e as Error).message }));
@@ -540,15 +540,21 @@ async function cmdOpen(positionals: string[]): Promise<number> {
   return (await openBrowser(target.url)) ? 0 : 1;
 }
 
+/** A viewer to stop, with what its registry entry says about it. */
+type StopEntry = StopTarget & { repo: string; installs?: boolean };
+
 /**
  * The cleanup a viewer that died without running its own does at exit: registry entry,
  * lock, hooks and bashEditDiffEnabled. After SIGKILL, and on Windows after any stop.
+ * A viewer started with --no-install had nothing to undo: hooks installed by hand
+ * (`neu install`) outlive it, as when it exits on its own.
  */
-function cleanupAfterKill(target: StopTarget & { repo: string }, info: string[], warn: string[]): boolean {
+function cleanupAfterKill(target: StopEntry, info: string[], warn: string[]): boolean {
   try {
     removeViewerEntry(target.pid);
     const lock = readLock(target.repo);
     if (lock && lock.pid === target.pid && !lock.alive) fs.rmSync(lockPath(target.repo), { force: true });
+    if (target.installs === false) return true;
     const u = undoInstall(target.repo);
     info.push(u.hooksChanged ? t('common.hooksRemoved') : t('common.noHooks'));
     const msg = bashDiffMessages(u.bashDiff);
@@ -562,7 +568,7 @@ function cleanupAfterKill(target: StopTarget & { repo: string }, info: string[],
 }
 
 /** Stops one viewer and returns what to print. `ok` false makes `stop` exit 1. */
-async function stopOne(target: StopTarget & { repo: string }, force: boolean): Promise<{ ok: boolean; info: string[]; warn: string[] }> {
+async function stopOne(target: StopEntry, force: boolean): Promise<{ ok: boolean; info: string[]; warn: string[] }> {
   const where = `${homeShort(target.repo)} (PID ${target.pid})`;
   const r = await stopViewer(target, { force });
   switch (r.status) {
@@ -599,11 +605,22 @@ async function stopOne(target: StopTarget & { repo: string }, force: boolean): P
   }
 }
 
+function stopEntry(v: StopTarget & { startedAt: string; installs?: boolean }, repo: string): StopEntry {
+  return {
+    pid: v.pid,
+    cmd: v.cmd,
+    startedAt: v.startedAt,
+    repo,
+    ...(v.command ? { command: v.command } : {}),
+    ...(v.installs !== undefined ? { installs: v.installs } : {}),
+  };
+}
+
 async function cmdStop(positionals: string[], o: Options): Promise<number> {
-  let targets: Array<StopTarget & { repo: string }>;
+  let targets: StopEntry[];
   if (o.all) {
     if (positionals.length > 0) fail(t('stop.allNoArgs'));
-    targets = listViewers().map((v) => ({ pid: v.pid, cmd: v.cmd, startedAt: v.startedAt, repo: v.repo, ...(v.command ? { command: v.command } : {}) }));
+    targets = listViewers().map((v) => stopEntry(v, v.repo));
     if (targets.length === 0) {
       out(t('common.noViewers'));
       return 0;
@@ -615,7 +632,7 @@ async function cmdStop(positionals: string[], o: Options): Promise<number> {
       out(t('common.noViewer', { repo }));
       return 1;
     }
-    targets = [{ pid: v.pid, cmd: v.cmd, startedAt: v.startedAt, repo, ...(v.command ? { command: v.command } : {}) }];
+    targets = [stopEntry(v, repo)];
   }
   if (targets.length > 1) out(t('stop.closing', { count: targets.length }));
   // In parallel: each one may take up to STOP_TIMEOUT_MS.

@@ -88,7 +88,7 @@ const MAX_DISCOVER_DIRS = 100_000;
 const IGNORE_BATCH = 500;
 const DEFAULT_PAIR_MS = 200;
 /** A renamed entry keeps its birth time; a new one is born when it is seen. */
-const FRESH_BIRTH_MS = 1000;
+export const FRESH_BIRTH_MS = 1000;
 const MAX_INODES = 50_000;
 /** Index entries lstat-ed per tick while the start-up inode record is filled. */
 const SEED_CHUNK = 1000;
@@ -158,8 +158,11 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
     // A default-excluded path the index knows anyway (put there by a hook) must still be
     // able to leave it.
     if (excluded(rel) && !(rel !== '' && !isAlwaysExcluded(rel) && index.has(rel))) return;
-    // The last raw event dates the change: inotify reports a touch at once, and a rename
-    // 10 ms later in the same batch must not be dated before the Bash window that made it.
+    // The last raw event dates the change, on every platform (I52, W5). inotify reports a
+    // touch at once, and Windows reports a last-write time change when its cache is flushed,
+    // up to a second late (ReadDirectoryChangesW docs). Either earlier sighting can share a
+    // batch with a real rename of the same path; the move must not be dated before the Bash
+    // window that made it. A batch spans at most coalesceMs from its first event.
     pending.set(rel, Date.now());
     if (!timer) timer = setTimeout(schedule, coalesceMs);
   }

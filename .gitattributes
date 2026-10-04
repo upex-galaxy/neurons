@@ -1,0 +1,10 @@
+# Text files keep LF on every system: tests compare README, docs and fixture bytes,
+# and Git for Windows checks them out with CRLF by default. docs/DECISIONS.md (W4).
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
