@@ -59,6 +59,11 @@ export interface NeuronsServerOptions {
   /** Called with errors that are swallowed to keep the server alive. */
   onError?: (err: unknown) => void;
   /**
+   * Warnings the user should see while the server runs (a new folder the disk watcher could
+   * not watch, e.g. the Linux inotify limit). Default: one line on stderr.
+   */
+  onWarning?: (message: string) => void;
+  /**
    * Extra browser origins allowed on /ws and /hook besides the server's own
    * (http://127.0.0.1:<port> and http://localhost:<port>), e.g. the Vite dev server.
    * Also read from NEURONS_ALLOWED_ORIGINS (comma separated; the legacy
@@ -550,14 +555,18 @@ export async function startNeuronsServer(o: NeuronsServerOptions): Promise<Neuro
       onChange: onDiskChange,
       excludeDefaults: !isGit,
       onError,
+      onDegraded: (err) => {
+        const warn = o.onWarning ?? ((m: string) => process.stderr.write(`${m}\n`));
+        warn(t('watcher.degraded', { error: err instanceof Error ? err.message : String(err) }));
+      },
     };
     if (o.coalesceMs !== undefined) watchOpts.coalesceMs = o.coalesceMs;
     if (isGit) watchOpts.isIgnored = (rels) => isGitIgnored(root, rels);
     try {
       watcher = startWatcher(watchOpts);
     } catch (err) {
-      // fs.watch can throw at start: ENOSPC (Linux inotify watch limit), EMFILE, or no
-      // recursive support on this platform. The hooks alone still drive the view.
+      // fs.watch can throw at start: ENOSPC (Linux inotify watch limit, one watch per
+      // folder there), EMFILE. The hooks alone still drive the view.
       watcherError = (err as Error).message;
       onError(err);
     }

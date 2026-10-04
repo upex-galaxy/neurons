@@ -122,25 +122,96 @@ export function promptDetail(prompt: string): string | undefined {
   return detail === '' ? undefined : detail;
 }
 
-// --- Bash command -> detail
+// --- Bash command -> detail and command
 // A Bash command can carry the content it writes (heredoc bodies, `echo ... > f`,
-// `python -c "open(...).write(...)"`). The detail keeps the command's shape and drops
-// that content: only the first logical line, quoted literals redacted when the line
-// writes files or runs inline code, echo/printf arguments redacted when it writes.
+// `{ echo ...; } > f`, `python -c "open(...).write(...)"`). `command` keeps the command's
+// shape and drops that content; `detail` is the first line of it. Whether the command
+// writes files or runs inline code is decided once for the whole command (heredoc bodies
+// left out), never line by line: a redirect, a `tee` or a `done > f` on one line can write
+// the literals of another (`{`, `do`, `then` groups, a line ending in `|`). When it does,
+// every quoted literal becomes "…", and so do the arguments of echo/printf/yes wherever
+// that word appears (also `/bin/echo`, `\echo`, after a redirect, inside `$( )`), the
+// arguments an interpreter gets after its code and awk `-v` values. Values that look like
+// secrets (`*_TOKEN=`, `--api-key`, an HTTP client's `Authorization:`, known token prefixes,
+// URL passwords) are redacted in every command. Best effort: a filter on the command text,
+// not a shell parser.
 
-/** Output redirect to a file (not `2>`, `>&2`, `>/dev/null`). */
-const WRITE_REDIRECT_RE = /(?:^|[^<>&\d])>{1,2}\|?\s*(?!&)(?!\/dev\/(?:null|stdout|stderr|tty)\b)[^\s&|;]/;
-const TEE_RE = /(?:^|[\s|;&(])tee(?:\s|$)/;
-const SED_INPLACE_RE = /(?:^|[\s|;&(])sed\b[^|;&]*\s-[A-Za-z]*i/;
-/** Interpreter with inline code: python -c, node -e/-p/--eval, perl -pe, bash -c... */
-const INLINE_CODE_RE =
-  /(?:^|[\s|;&(/])(?:python[\d.]*|node|nodejs|deno|bun|tsx|perl|ruby|php|bash|sh|zsh|dash|fish|osascript)\b[^|;&]*?\s-(?:[A-Za-z]*[cep]\b|-eval\b|-print\b)/;
-const QUOTED_RE = /\$?'[^']*'|"(?:[^"\\]|\\.)*"/g;
+/** Before a command name: start, an operator, a group opener or a space. */
+const CMD_AT = String.raw`(?:^|[\s|;&(!{}\x60])`;
+/** A command name may come with its path (`/usr/bin/tee`) or a leading `\` (`\tee`, no alias). */
+const CMD_PATH = String.raw`\\?(?:[^\s|;&()<>'"\x60]*/)?`;
+const TEE_RE = new RegExp(String.raw`${CMD_AT}${CMD_PATH}tee(?:\s|$)`);
+const SED_INPLACE_RE = new RegExp(String.raw`${CMD_AT}${CMD_PATH}g?sed\b[^|;&]*\s(?:-[A-Za-z]*i|--in-place)`);
+/** Writers fed through a pipe or in place: `sponge f`, `dd of=f`, `sd from to f`. */
+const PIPE_WRITER_RE = new RegExp(String.raw`${CMD_AT}${CMD_PATH}(?:sponge(?:\s|$)|sd\s|dd\b[^|;&]*\sof=)`);
+/** Content that reaches a file through stdin or a process substitution (`cp /dev/stdin f`, `cp <(printf x) f`). */
+const STDIN_FILE_RE = /(?:^|[\s=])\/dev\/(?:stdin|fd\/\d+)(?![\w./-])|<\(/;
+/** Interpreters and editors that run code given on their command line or stdin. */
+const INTERPRETERS = String.raw`python[\d.]*|pypy[\d.]*|py|node|nodejs|deno|bun|tsx|ts-node|perl|ruby|php|lua(?:jit)?|rscript|swift|julia|groovy|bash|sh|zsh|dash|ksh|fish|osascript|pwsh|powershell|cmd|vim?|nvim|ex`;
+const INTERPRETER_NAME_RE = new RegExp(String.raw`^(?:${INTERPRETERS})(?:\.exe)?$`, 'i');
+/** The flag (or subcommand) after which an interpreter's arguments are code: -c, -e, -pe, --eval, -Command, /c, eval. */
+const CODE_FLAG_RE = /^(?:-(?:[a-z]*[cepr]|-?(?:eval|print|exec(?:ute)?)|-?[a-z]*command)|\/[ck]|eval)$/i;
+/**
+ * Interpreter with inline code: python -c, node -e/-p/--eval, perl -pe/-nE, php -r,
+ * Rscript/lua/swift/julia -e, pwsh/powershell -c/-Command/-EncodedCommand, cmd /c,
+ * bash -c, vim -c, ex -sc, deno eval... Flags in any case.
+ */
+const INLINE_CODE_RE = new RegExp(
+  String.raw`(?:^|[\s|;&(/\\\x60])(?:(?:${INTERPRETERS})(?:\.exe)?\b[^|;&]*?\s(?:-(?:[a-z]*[cepr]\b|-?(?:eval|print|exec(?:ute)?)\b|-?[a-z]*command\b)|\/[ck]\b)|(?:deno|bun)\s+eval\b)`,
+  'i',
+);
+/** Code piped into an interpreter that reads its program from stdin (`echo '...' | python3`, `| ed f`). */
+const STDIN_CODE_RE = new RegExp(
+  String.raw`\|&?\s*(?:sudo\s+(?:-\S+\s+)*)?${CMD_PATH}(?:(?:${INTERPRETERS})(?:\.exe)?(?:\s+-[A-Za-z-]*)*\s*(?:$|[|;&)\n])|(?:ed|ex)\b)`,
+  'i',
+);
+
+function runsInlineCode(s: string): boolean {
+  return INLINE_CODE_RE.test(s) || STDIN_CODE_RE.test(s);
+}
 const REDACTED = '…';
 
-/** Index of a quote that is never closed on this line, or -1. */
+/**
+ * True when `s` sends output to a file: `>`, `>>`, `>|`, `&>`, `&>>`, `1>`, `>&file`, and a
+ * `>` glued to a word (`PORT=3000>.env` writes `PORT=3000`), and `>&3` and up (a descriptor
+ * opened on a file, `exec 3>f`). Not an fd of its own (`2>`, `3>>`), a duplication (`>&2`,
+ * `2>&1`, `>&-`) or `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty`.
+ */
+export function writesRedirect(s: string): boolean {
+  for (let i = s.indexOf('>'); i !== -1; i = s.indexOf('>', i + 1)) {
+    const prev = s[i - 1];
+    if (prev === '>' || prev === '<') continue; // the second `>` of `>>`, or `<>` (stdin)
+    let k = i;
+    while (k > 0 && /\d/.test(s[k - 1] as string)) k--;
+    // A whole word of digits is an fd number: only 1 is stdout.
+    if (k < i && (k === 0 || /[\s;&|(){}]/.test(s[k - 1] as string)) && s.slice(k, i) !== '1') continue;
+    let j = i + 1;
+    if (s[j] === '>') j++;
+    if (s[j] === '|') j++;
+    if (s[j] === '&') {
+      const fd = /^\d+/.exec(s.slice(j + 1, j + 12))?.[0];
+      // >&2, >&-: a duplication. >&3 and up: a descriptor opened earlier (`exec 3>f`), so a file.
+      if (fd !== undefined && Number(fd) >= 3) return true;
+      if (fd !== undefined || s[j + 1] === '-') continue;
+      j++;
+    }
+    while (s[j] === ' ' || s[j] === '\t') j++;
+    const rest = s.slice(j);
+    if (rest === '' || /^[\s&|;]/.test(rest)) continue;
+    if (/^\/dev\/(?:null|stdout|stderr|tty)(?![\w./-])/.test(rest)) continue;
+    return true;
+  }
+  return false;
+}
+
+function writesFiles(s: string): boolean {
+  return writesRedirect(s) || TEE_RE.test(s) || SED_INPLACE_RE.test(s) || PIPE_WRITER_RE.test(s) || STDIN_FILE_RE.test(s);
+}
+
+/** Index of a quote that is never closed on this line, or -1 (`$'..'` honors `\'`). */
 function unterminatedQuote(s: string): number {
   let quote: string | undefined;
+  let ansi = false;
   let start = -1;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
@@ -148,19 +219,24 @@ function unterminatedQuote(s: string): number {
       if (c === '\\') i++;
       else if (c === "'" || c === '"') {
         quote = c;
+        ansi = c === "'" && s[i - 1] === '$';
         start = i;
       }
-    } else if (quote === '"' && c === '\\') i++;
+    } else if ((quote === '"' || ansi) && c === '\\') i++;
     else if (c === quote) quote = undefined;
   }
   return quote === undefined ? -1 : start;
 }
 
-/** A Bash command reduced to a one-line detail without the content it may write. */
+/**
+ * A Bash command reduced to a one-line detail without the content it may write: the first
+ * line of bashCommand (so the same whole-command redaction), a literal that goes on past
+ * that line cut at its quote, and "…" when more lines follow.
+ */
 export function bashDetail(command: string): string {
-  let s = command.replace(/\\\r?\n/g, ' ');
+  let s = bashCommand(command).replace(/\\\n/g, ' ');
   let dropped = false;
-  const nl = s.search(/\r?\n/);
+  const nl = s.indexOf('\n');
   if (nl >= 0) {
     dropped = s.slice(nl).trim() !== '';
     s = s.slice(0, nl);
@@ -171,29 +247,14 @@ export function bashDetail(command: string): string {
     s = s.slice(0, open + 1) + REDACTED;
     dropped = false;
   }
-  const writes = WRITE_REDIRECT_RE.test(s) || TEE_RE.test(s) || SED_INPLACE_RE.test(s);
-  if (writes || INLINE_CODE_RE.test(s)) {
-    s = s.replace(QUOTED_RE, (q) => (q.startsWith('$') ? `$'${REDACTED}'` : `${q[0]}${REDACTED}${q[0]}`));
-  }
-  // Here-string: `cmd <<< word` feeds the word as stdin content.
-  s = s.replace(/<<<\s*(?:\S+)?/g, `<<< ${REDACTED}`);
-  if (writes) {
-    s = s
-      .split(/(\|\||&&|[|;&])/)
-      .map((seg) =>
-        seg.replace(/^(\s*(?:sudo\s+)?(?:echo|printf))((?:\s+[^\s<>|;&]+)+)/, (_m, cmd: string) => `${cmd} ${REDACTED}`),
-      )
-      .join('');
-  }
   return shortDetail(dropped ? `${s} ${REDACTED}` : s);
 }
 
 // --- Bash command -> command (multi-line)
-// The full command for the detail panel, under the same rule as bashDetail: heredoc bodies
-// are cut (a "…" line stands for each), and in a statement that writes files or runs
-// inline code every quoted literal becomes "…", echo/printf arguments too. Statements are
-// split at newlines outside quotes and $( ), so a literal spanning lines is judged with
-// the redirect that follows it. A literal never closed is cut at its opening quote.
+// The full command for the detail panel: heredoc bodies are cut (a "…" line stands for
+// each), statements are split at newlines outside quotes and $( ) only to cut a literal
+// never closed at its opening quote, and the write / inline-code decision covers the whole
+// command (see above).
 
 type ShellCtx = "'" | '"' | '$(' | '(' | '`';
 
@@ -294,21 +355,216 @@ function redactHereStrings(s: string): string {
   return out + s.slice(i);
 }
 
-function redactStatement(stmt: string): string {
-  let s = stmt;
-  const flat = s.replace(/\\\n/g, ' ');
-  const writes = WRITE_REDIRECT_RE.test(flat) || TEE_RE.test(flat) || SED_INPLACE_RE.test(flat);
-  if (writes || INLINE_CODE_RE.test(flat)) s = redactQuoted(s);
-  s = redactHereStrings(s);
-  if (writes) {
-    s = s
-      .split(/(\|\||&&|[|;&])/)
-      .map((seg) =>
-        seg.replace(/^(\s*(?:sudo\s+)?(?:echo|printf))((?:[ \t]+[^\s<>|;&]+)+)/, (_m, cmd: string) => `${cmd} ${REDACTED}`),
-      )
-      .join('');
+/** Commands whose arguments are the text they print. */
+const PRINTERS = new Set(['echo', 'printf', 'yes']);
+/** Redirect operator at a word start, with an fd (`2>`) or `{var}` before it; not `<(`/`>(`. */
+const REDIRECT_RE = /(?:\d+|\{[A-Za-z_]\w*\})?(?:&>>?|>>|>\||>&|<<<|<<-?|<&|<>|>|<)(?!\()/y;
+/** Control operators (a `&` before `>` is the `&>` redirect). */
+const OPERATOR_RE = /\|\||&&|;;|\|&|[|;\n)]|&(?!>)/y;
+
+/** The command name a word stands for: no leading `\`, no directory (`/bin/echo` is echo). */
+function commandName(word: string): string {
+  const w = word.startsWith('\\') ? word.slice(1) : word;
+  return w.slice(w.lastIndexOf('/') + 1);
+}
+
+/** A literal redactQuoted already reduced to its quotes. */
+function isRedactedLiteral(word: string): boolean {
+  return word === `'${REDACTED}'` || word === `"${REDACTED}"` || word === `$'${REDACTED}'`;
+}
+
+/**
+ * Reads one shell word at `i` (quotes, `$( )`, `<( )`, backticks, `${ }` and escapes
+ * included). `inner` is the word with the commands inside its substitutions redacted too.
+ */
+function readWord(s: string, i: number, inline: boolean): { end: number; inner: string } {
+  let j = i;
+  let inner = '';
+  while (j < s.length) {
+    const c = s[j] as string;
+    const next = s[j + 1];
+    if (c === ' ' || c === '\t' || c === '\n' || c === '|' || c === ';' || c === '&' || c === ')') break;
+    if ((c === '<' || c === '>') && next !== '(') break;
+    if (c === '\\') {
+      if (next === '\n') break; // a line continuation separates words
+      inner += s.slice(j, j + 2);
+      j += 2;
+    } else if (c === "'") {
+      const k = skipSingle(s, j, s[j - 1] === '$');
+      inner += s.slice(j, k);
+      j = k;
+    } else if (c === '"') {
+      const k = skipDouble(s, j);
+      inner += s.slice(j, k);
+      j = k;
+    } else if (c === '`') {
+      let k = j + 1;
+      while (k < s.length && s[k] !== '`') k += s[k] === '\\' ? 2 : 1;
+      inner += '`' + redactArgs(s.slice(j + 1, Math.min(k, s.length)), inline) + (k < s.length ? '`' : '');
+      j = k + 1;
+    } else if (next === '(' && (c === '$' || c === '<' || c === '>')) {
+      const k = skipParen(s, j + 1);
+      const closed = s[k - 1] === ')';
+      inner += c + '(' + redactArgs(s.slice(j + 2, closed ? k - 1 : k), inline) + (closed ? ')' : '');
+      j = k;
+    } else if (c === '(') {
+      const k = skipParen(s, j);
+      inner += s.slice(j, k);
+      j = k;
+    } else if (c === '$' && next === '{') {
+      const k = s.indexOf('}', j);
+      const stop = k === -1 ? s.length : k + 1;
+      inner += s.slice(j, stop);
+      j = stop;
+    } else {
+      inner += c;
+      j++;
+    }
   }
-  return s;
+  return { end: j, inner };
+}
+
+/**
+ * In a command that writes files or runs inline code: the arguments of echo/printf/yes
+ * (wherever that word appears, `/bin/echo` and `\echo` too) up to the next operator, the
+ * arguments an interpreter gets after its code (`python3 -c '…' f DATA`, `sh -c '…' _ DATA`)
+ * when `inline`, and `-v name=value` values (awk). Redirects and their targets stay; a run
+ * of redacted words becomes one "…". Commands inside `$( )`, `<( )` and backticks get the
+ * same treatment.
+ */
+function redactArgs(s: string, inline: boolean): string {
+  let out = '';
+  let ws = '';
+  let i = 0;
+  /** none: a command or its plain args; print: printer args; interp: an interpreter's options; code: after its code flag. */
+  let mode: 'none' | 'print' | 'interp' | 'code' = 'none';
+  let lastRedacted = false;
+  let prevWord = '';
+  const emit = (text: string, redacted: boolean): void => {
+    if (redacted && lastRedacted) {
+      ws = '';
+      return;
+    }
+    out += ws + text;
+    ws = '';
+    lastRedacted = redacted;
+  };
+  while (i < s.length) {
+    const c = s[i] as string;
+    if (c === ' ' || c === '\t') {
+      ws += c;
+      i++;
+      continue;
+    }
+    if (c === '\\' && s[i + 1] === '\n') {
+      ws += '\\\n';
+      i += 2;
+      continue;
+    }
+    REDIRECT_RE.lastIndex = i;
+    const redirect = REDIRECT_RE.exec(s);
+    if (redirect) {
+      // The operator and its target stay as typed.
+      emit(redirect[0], false);
+      i = REDIRECT_RE.lastIndex;
+      while (s[i] === ' ' || s[i] === '\t') ws += s[i++];
+      OPERATOR_RE.lastIndex = i;
+      if (i < s.length && !OPERATOR_RE.test(s)) {
+        const w = readWord(s, i, inline);
+        emit(w.inner, false);
+        i = w.end;
+      }
+      continue;
+    }
+    OPERATOR_RE.lastIndex = i;
+    const op = OPERATOR_RE.exec(s);
+    if (op) {
+      emit(op[0], false);
+      i = OPERATOR_RE.lastIndex;
+      mode = 'none';
+      prevWord = '';
+      continue;
+    }
+    if (c === '(') {
+      // A subshell: a command starts inside it.
+      emit('(', false);
+      i++;
+      mode = 'none';
+      prevWord = '';
+      continue;
+    }
+    const raw = readWord(s, i, inline);
+    if (raw.end === i) {
+      // Not a word start (never expected): keep the char and move on.
+      emit(c, false);
+      i++;
+      continue;
+    }
+    const word = s.slice(i, raw.end);
+    i = raw.end;
+    if (mode === 'print') {
+      emit(REDACTED, true);
+    } else if (mode === 'code') {
+      if (isRedactedLiteral(word)) emit(word, false);
+      else emit(REDACTED, true);
+    } else {
+      const assign = /^(-v|--assign)$/.test(prevWord) ? /^([A-Za-z_]\w*=)./.exec(word) : null;
+      emit(assign ? `${assign[1]}${REDACTED}` : raw.inner, false);
+      const name = commandName(word);
+      if (PRINTERS.has(name)) mode = 'print';
+      else if (mode === 'interp' && CODE_FLAG_RE.test(word)) mode = 'code';
+      else if (inline && INTERPRETER_NAME_RE.test(name)) mode = 'interp';
+    }
+    prevWord = word;
+  }
+  return out + ws;
+}
+
+/** A variable name that says secret (GITHUB_TOKEN, DB_PASSWORD, STRIPE_KEY, api_key). */
+const SECRET_VAR = String.raw`[A-Za-z0-9_]*(?:token|secret|passw(?:or)?d|pwd|api_?key|_key|credentials?|auth(?!or))[A-Za-z0-9_]*`;
+/** A flag name that says secret (--api-key, --auth-token, --password); `--primary-key` and `--sort-key` do not. */
+const SECRET_FLAG = String.raw`[A-Za-z0-9_-]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|(?:access|secret|client|app|master|license|signing|encryption|service|account|session)[_-]key|credentials?|auth(?!or))[A-Za-z0-9_-]*`;
+const SECRET_VALUE = String.raw`(?:\$'(?:[^'\\]|\\.)*'|'[^']*'|"(?:[^"\\]|\\.)*"|[^\s;&|<>()'"]+)+`;
+/** NAME=value whose name says secret (GITHUB_TOKEN=, DB_PASSWORD=, ?api_key=). */
+const SECRET_ASSIGN_RE = new RegExp(String.raw`(^|[\s;&|(?"'\x60])(${SECRET_VAR})=${SECRET_VALUE}`, 'gi');
+/** --name=value whose name says secret (--api-key=, --password=). */
+const SECRET_FLAG_ASSIGN_RE = new RegExp(String.raw`((?:^|\s)--?${SECRET_FLAG})=${SECRET_VALUE}`, 'gi');
+/** --token value, -password value. */
+const SECRET_FLAG_RE = new RegExp(String.raw`((?:^|\s)--?${SECRET_FLAG})([ \t]+)(?!-)${SECRET_VALUE}`, 'gi');
+/** An HTTP client at a command position: only its arguments carry request headers. */
+const HTTP_CLIENT_RE = new RegExp(String.raw`(?:^|[|;&(\n\x60]|\$\()\s*(?:(?:sudo|time|command|exec|xargs|env)\s+(?:-\S+\s+|\w+=\S*\s+)*)*${CMD_PATH}(?:curl|wget|xh|xhs|https?|httpie|grpcurl|aria2c)(?:\s|$)`);
+/** Authorization: Bearer x, X-Api-Key: x, Cookie: x (to the end of the literal), in an HTTP client's arguments. */
+const SECRET_HEADER_RE = /\b((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|private-token|cookie)(\s*:\s*)[^"'\n]+/gi;
+/** `Bearer <token>` / `Basic <base64>` anywhere; the value must look like one (a digit or symbol, not a plain word). */
+const BEARER_RE = /\b(bearer|basic)(\s+)(?=[A-Za-z._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,}/gi;
+/** scheme://user:password@host */
+const URL_PASSWORD_RE = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/"']+:)[^\s@/"']+@/gi;
+/** curl -u user:password */
+const USER_PASSWORD_RE = /((?:^|\s)(?:-u|--user)\s+[^\s:"']+:)[^\s"']+/g;
+/** Well-known token shapes (GitHub, OpenAI/Anthropic, Stripe, Slack, AWS, Google, GitLab). */
+const TOKEN_RE =
+  /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|[sr]k_(?:live|test)_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,})/g;
+
+/** Values that look like secrets, in any command (best effort). */
+export function redactSecrets(s: string): string {
+  let out = s
+    .replace(SECRET_ASSIGN_RE, (_m, pre: string, name: string) => `${pre}${name}=${REDACTED}`)
+    .replace(SECRET_FLAG_ASSIGN_RE, (_m, flag: string) => `${flag}=${REDACTED}`)
+    .replace(SECRET_FLAG_RE, (_m, flag: string, sp: string) => `${flag}${sp}${REDACTED}`);
+  if (HTTP_CLIENT_RE.test(out)) out = out.replace(SECRET_HEADER_RE, (_m, name: string, sep: string) => `${name}${sep}${REDACTED}`);
+  return out
+    .replace(BEARER_RE, (_m, word: string, sp: string) => `${word}${sp}${REDACTED}`)
+    .replace(URL_PASSWORD_RE, (_m, pre: string) => `${pre}${REDACTED}@`)
+    .replace(USER_PASSWORD_RE, (_m, pre: string) => `${pre}${REDACTED}`)
+    .replace(TOKEN_RE, REDACTED);
+}
+
+function redactStatement(stmt: string, writes: boolean, inline: boolean): string {
+  let s = stmt;
+  if (writes || inline) s = redactQuoted(s);
+  s = redactHereStrings(s);
+  if (writes || inline) s = redactArgs(s, inline);
+  return redactSecrets(s);
 }
 
 /** A Bash command for display: newlines kept, at most 2000 chars, without the content it writes. */
@@ -324,7 +580,7 @@ export function bashCommand(command: string): string {
     const open = stack[0];
     // A literal or substitution never closed swallows the rest: keep only its opener.
     if (open) buf = buf.slice(0, open.at + open.ctx.length) + REDACTED;
-    parts.push(redactStatement(buf));
+    parts.push(buf);
     buf = '';
     stack.length = 0;
   };
@@ -439,7 +695,14 @@ export function bashCommand(command: string): string {
     i++;
   }
   if (buf !== '' || stack.length > 0) flush();
-  const out = parts.join('\n').replace(/^\n+|\s+$/g, '');
+  // One decision for the whole command (heredoc bodies are already "…").
+  const flat = parts.join('\n').replace(/\\\n/g, ' ');
+  const writes = writesFiles(flat);
+  const inline = runsInlineCode(flat);
+  const out = parts
+    .map((part) => redactStatement(part, writes, inline))
+    .join('\n')
+    .replace(/^\n+|\s+$/g, '');
   return out.length > COMMAND_MAX ? out.slice(0, COMMAND_MAX - 1) + '…' : out;
 }
 

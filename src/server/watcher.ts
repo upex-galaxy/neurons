@@ -1,5 +1,15 @@
-// Recursive disk watcher on top of fs.watch (FSEvents on macOS, one handle for
-// the whole tree). Raw events carry no reliable type, so each path is coalesced
+// Disk watcher on top of fs.watch. On macOS and Windows one recursive handle covers the
+// whole tree (FSEvents, ReadDirectoryChangesW). Elsewhere (Linux) Node's recursive mode
+// walks the whole tree and opens one inotify watch per file and folder, node_modules and
+// .git included, and it swallows ENOSPC (a partial set of watches stays open, nothing is
+// reported). So there the watcher opens one non-recursive watch per directory of the tree
+// index (excluded and git-ignored folders never enter it), adds one for every new folder
+// and drops it when the folder goes. The index only knows folders that hold a listed file,
+// so right after the start the watcher also walks the disk for folders it lacks (empty
+// ones, ones past the scan cap) and watches those git does not ignore; a new folder gets
+// the same walk (a subtree deeper than maxWalk). A watch that cannot be opened at start
+// throws (the caller reports it); one that fails later goes to onDegraded.
+// Raw events carry no reliable type, so each path is coalesced
 // and then classified with lstat against the tree index.
 // An unlink and an add that belong together are reported as one move: same inode,
 // the same path in another case, or, for an entry that was not born just now, the
@@ -31,6 +41,32 @@ export interface WatcherOptions {
   /** How long an unmatched unlink waits for the add that would make it a move. */
   pairMs?: number;
   onError?: (err: unknown) => void;
+  /** A folder that appeared after the start could not be watched (ENOSPC, EMFILE): its changes are missed. */
+  onDegraded?: (err: unknown) => void;
+  /** Platform that picks the watch mode (see usesNativeRecursive). Default: process.platform. */
+  platform?: NodeJS.Platform;
+  /** fs.watch, replaceable in tests. */
+  watch?: typeof fs.watch;
+}
+
+/**
+ * True where fs.watch's recursive mode is one native handle (macOS, Windows). Elsewhere it
+ * is Node's JS fallback (one inotify watch per entry), so the watcher watches each
+ * directory on its own.
+ */
+export function usesNativeRecursive(platform: NodeJS.Platform): boolean {
+  return platform === 'darwin' || platform === 'win32';
+}
+
+/**
+ * The directories a per-directory watcher opens at start: the root ('') and every dir of
+ * the index that `excluded` lets through (.git, .neurons, subagent worktrees, and outside
+ * git node_modules, dist...). Git-ignored dirs are never in the index of a git repo.
+ */
+export function initialWatchDirs(index: TreeIndex, excluded: (rel: string) => boolean): string[] {
+  const dirs = [''];
+  for (const e of index.snapshot().entries) if (e.kind === 'dir' && !excluded(e.path)) dirs.push(e.path);
+  return dirs;
 }
 
 interface Probe {
@@ -40,6 +76,10 @@ interface Probe {
 }
 
 const DEFAULT_MAX_WALK = 5000;
+/** Max directories one disk walk for unwatched folders visits. */
+const MAX_DISCOVER_DIRS = 100_000;
+/** Paths per isIgnored call during that walk. */
+const IGNORE_BATCH = 500;
 const DEFAULT_PAIR_MS = 200;
 /** A renamed entry keeps its birth time; a new one is born when it is seen. */
 const FRESH_BIRTH_MS = 1000;
@@ -99,16 +139,150 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
   const excluded = (rel: string): boolean =>
     rel === '' || isAlwaysExcluded(rel) || (excludeDefaults && isExcludedRel(rel));
 
-  const watcher = fs.watch(root, { recursive: true }, (_type, filename) => {
-    if (closed || filename === null || filename === undefined) return;
-    const rel = toPosix(String(filename)).replace(/^\.?\/+|\/+$/g, '');
+  function onRaw(raw: string): void {
+    const rel = toPosix(raw).replace(/^\.?\/+|\/+$/g, '');
     // A default-excluded path the index knows anyway (put there by a hook) must still be
     // able to leave it.
     if (excluded(rel) && !(rel !== '' && !isAlwaysExcluded(rel) && index.has(rel))) return;
     if (!pending.has(rel)) pending.set(rel, Date.now());
     if (!timer) timer = setTimeout(schedule, coalesceMs);
-  });
-  watcher.on('error', onError);
+  }
+
+  const watchFn = opts.watch ?? fs.watch;
+  const native = usesNativeRecursive(opts.platform ?? process.platform);
+  /** Per-directory mode: rel dir -> its non-recursive watch. */
+  const dirWatchers = new Map<string, fs.FSWatcher>();
+  let degraded = false;
+
+  function watchDir(rel: string): void {
+    if (closed || dirWatchers.has(rel) || (rel !== '' && excluded(rel))) return;
+    const w = watchFn(rel === '' ? root : path.join(root, rel), (_type, filename) => {
+      if (closed || filename === null || filename === undefined) return;
+      const name = toPosix(String(filename));
+      onRaw(rel === '' ? name : `${rel}/${name}`);
+    });
+    w.on('error', (err) => {
+      // The folder went away (or the platform dropped the watch): its parent reports the rest.
+      unwatchTree(rel);
+      onError(err);
+    });
+    dirWatchers.set(rel, w);
+  }
+
+  /** Watches a folder that appeared after the start; a failure is reported once, not thrown. */
+  function watchNewDir(rel: string): void {
+    try {
+      watchDir(rel);
+    } catch (err) {
+      onError(err);
+      if (!degraded) {
+        degraded = true;
+        opts.onDegraded?.(err);
+      }
+    }
+  }
+
+  function unwatchTree(rel: string): void {
+    for (const [dir, w] of dirWatchers) {
+      if (dir === rel || dir.startsWith(`${rel}/`)) {
+        dirWatchers.delete(dir);
+        w.close();
+      }
+    }
+  }
+
+  /** Keeps the per-directory watches in step with the folders the watcher reports. */
+  function track(c: DiskChange): void {
+    if (native) return;
+    if (c.type === 'addDir') {
+      watchNewDir(c.path);
+      discoverOnce(c.path);
+    } else if (c.type === 'unlinkDir') unwatchTree(c.path);
+    else if (c.type === 'moveDir') {
+      if (c.from !== undefined) unwatchTree(c.from);
+      watchNewDir(c.path);
+      discoverOnce(c.path);
+    }
+  }
+
+  /** Roots walked during the current flush: a new subtree is walked once, from its top. */
+  const walkedRoots = new Set<string>();
+
+  function discoverOnce(rel: string): void {
+    if (walkedRoots.has(rel) || hasAncestorIn(rel, walkedRoots)) return;
+    walkedRoots.add(rel);
+    discover(rel);
+  }
+
+  /** Disk walks for unwatched folders still running (close waits for them). */
+  const discovering = new Set<Promise<void>>();
+
+  /** Starts a walk under `rel` for folders without a watch (see discoverDirs). */
+  function discover(rel: string): void {
+    const run = discoverDirs(rel)
+      .catch(onError)
+      .finally(() => discovering.delete(run));
+    discovering.add(run);
+  }
+
+  /**
+   * Walks the folders under `rel` on disk and watches the ones that have no watch yet:
+   * empty folders and folders holding only unlisted files are not in a git repo's index,
+   * and a scan or walk cap leaves others out. Excluded and git-ignored folders are skipped
+   * with their subtree (node_modules is never walked).
+   */
+  async function discoverDirs(rel: string): Promise<void> {
+    let level = [rel];
+    let visited = 0;
+    while (level.length > 0 && !closed && visited < MAX_DISCOVER_DIRS) {
+      const candidates: string[] = [];
+      for (const dir of level) {
+        if (++visited > MAX_DISCOVER_DIRS) break;
+        let dirents: fs.Dirent[];
+        try {
+          dirents = fs.readdirSync(dir === '' ? root : path.join(root, dir), { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const d of dirents) {
+          if (!d.isDirectory()) continue;
+          const child = dir === '' ? d.name : `${dir}/${d.name}`;
+          if (excluded(child) || isCachedIgnored(child)) continue;
+          candidates.push(child);
+        }
+      }
+      // Folders of the index are known not to be ignored; ask git about the rest.
+      const unknown = candidates.filter((c) => index.kind(c) !== 'dir');
+      for (let i = 0; i < unknown.length && !closed; i += IGNORE_BATCH) await learnIgnored(unknown.slice(i, i + IGNORE_BATCH));
+      if (closed) return;
+      level = [];
+      for (const c of candidates) {
+        if (isCachedIgnored(c)) continue;
+        watchNewDir(c);
+        level.push(c);
+      }
+    }
+  }
+
+  let watcher: fs.FSWatcher | undefined;
+  if (native) {
+    watcher = watchFn(root, { recursive: true }, (_type, filename) => {
+      if (closed || filename === null || filename === undefined) return;
+      onRaw(String(filename));
+    });
+    watcher.on('error', onError);
+  } else {
+    try {
+      for (const rel of initialWatchDirs(index, excluded)) watchDir(rel);
+    } catch (err) {
+      // ENOSPC (inotify limit), EMFILE...: release what was opened, the caller reports it.
+      for (const w of dirWatchers.values()) w.close();
+      dirWatchers.clear();
+      throw err;
+    }
+    // Folders the index does not know (empty, unlisted files only, past the scan cap).
+    discover('');
+  }
 
   function schedule(): void {
     timer = undefined;
@@ -189,6 +363,7 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
 
   async function flush(batch: Map<string, number>): Promise<void> {
     if (closed) return;
+    walkedRoots.clear();
     const listings = new Map<string, string[] | undefined>();
     const probes = new Map<string, Probe>();
     for (const rel of batch.keys()) probes.set(rel, { rel, stat: probeStat(rel, listings) });
@@ -233,6 +408,7 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
     if (closed) return;
     for (const c of pairMoves(changes, stats)) {
       if (closed) return;
+      track(c);
       opts.onChange(c);
     }
     scheduleHeld();
@@ -370,6 +546,7 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
       if (probeStat(h.change.path, listings)) continue; // Back on disk: its own event says so.
       if (!index.has(h.change.path)) continue;
       inodes.delete(h.change.path);
+      track(h.change);
       opts.onChange(h.change);
     }
     scheduleHeld();
@@ -406,7 +583,10 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
       timer = undefined;
       heldTimer = undefined;
       held = [];
-      watcher.close();
+      watcher?.close();
+      for (const w of dirWatchers.values()) w.close();
+      dirWatchers.clear();
+      await Promise.all([...discovering]);
       await chain;
     },
   };

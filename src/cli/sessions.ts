@@ -1,6 +1,6 @@
 // Finds Claude Code sessions already running in a repo, so `start` can say they pick up
-// the hooks it just installed (verified live on 2.1.288; older versions may need a
-// restart). Read-only: these processes are never signaled. Every failure (no ps, no
+// the hooks it just installed (verified live with 2.1.288 on macOS; if one shows no events,
+// /reload-plugins in it, then /exit and claude --continue: docs/DECISIONS.md I50). Read-only: these processes are never signaled. Every failure (no ps, no
 // lsof, no /proc) means "unknown", never an error.
 //
 // macOS: `ps -axo pid=,ppid=,args=` picks the candidates and

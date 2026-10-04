@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { DiskChange } from '../../src/server/attribution.ts';
 import { TreeIndex, isGitIgnored, scanTree } from '../../src/server/tree.ts';
-import { startWatcher, type WatcherHandle } from '../../src/server/watcher.ts';
+import { initialWatchDirs, startWatcher, usesNativeRecursive, type WatcherHandle } from '../../src/server/watcher.ts';
 
 const tmpDirs: string[] = [];
 const handles: WatcherHandle[] = [];
@@ -24,9 +24,10 @@ afterAll(() => {
   for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
 });
 
-function makeRepo(files: Record<string, string>, git = false): string {
+function makeRepo(files: Record<string, string>, git = false, emptyDirs: string[] = []): string {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'rs-watch-')));
   tmpDirs.push(dir);
+  for (const rel of emptyDirs) fs.mkdirSync(path.join(dir, rel), { recursive: true });
   for (const [rel, content] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
     fs.writeFileSync(path.join(dir, rel), content);
@@ -47,9 +48,20 @@ interface Setup {
 /** Starts a watcher; with `apply`, mirrors the server by applying structural changes to the index. */
 async function setup(
   files: Record<string, string>,
-  opts: { apply?: boolean; git?: boolean; isIgnored?: (rels: string[]) => Promise<Set<string>> } = {},
+  opts: {
+    apply?: boolean;
+    git?: boolean;
+    isIgnored?: (rels: string[]) => Promise<Set<string>>;
+    platform?: NodeJS.Platform;
+    watch?: typeof fs.watch;
+    onDegraded?: (err: unknown) => void;
+    /** Directories created empty (no file in them, so not in a git repo's index). */
+    emptyDirs?: string[];
+    /** isIgnored = real `git check-ignore` in the repo. */
+    gitIgnore?: boolean;
+  } = {},
 ): Promise<Setup> {
-  const root = makeRepo(files, opts.git);
+  const root = makeRepo(files, opts.git, opts.emptyDirs);
   const index = new TreeIndex(await scanTree(root));
   const changes: DiskChange[] = [];
   const apply = opts.apply ?? true;
@@ -69,6 +81,10 @@ async function setup(
     },
   };
   if (opts.isIgnored) watchOpts.isIgnored = opts.isIgnored;
+  if (opts.gitIgnore) watchOpts.isIgnored = (rels) => isGitIgnored(root, rels);
+  if (opts.platform) watchOpts.platform = opts.platform;
+  if (opts.watch) watchOpts.watch = opts.watch;
+  if (opts.onDegraded) watchOpts.onDegraded = opts.onDegraded;
   handles.push(startWatcher(watchOpts));
   // Let FSEvents start its stream (and replay its short history) before touching the disk.
   await sleep(150);
@@ -375,5 +391,159 @@ describe('startWatcher', () => {
     fs.writeFileSync(path.join(s.root, 'late.txt'), 'l');
     await sleep(250);
     expect(s.changes).toEqual([]);
+  });
+});
+
+describe('watch mode selection (Linux: one non-recursive watch per indexed dir)', () => {
+  it('uses one native recursive handle only on macOS and Windows', () => {
+    expect(usesNativeRecursive('darwin')).toBe(true);
+    expect(usesNativeRecursive('win32')).toBe(true);
+    expect(usesNativeRecursive('linux')).toBe(false);
+    expect(usesNativeRecursive('freebsd')).toBe(false);
+  });
+
+  it('initialWatchDirs is the root plus the indexed dirs, without excluded ones', () => {
+    const index = new TreeIndex({
+      root: '/r',
+      name: 'r',
+      truncated: false,
+      entries: [
+        { path: 'src', kind: 'dir' },
+        { path: 'src/a.ts', kind: 'file' },
+        { path: 'src/lib', kind: 'dir' },
+        { path: 'dist', kind: 'dir' },
+        { path: 'dist/x.js', kind: 'file' },
+      ],
+    });
+    const excluded = (rel: string) => rel === 'dist' || rel.startsWith('dist/');
+    expect(initialWatchDirs(index, excluded)).toEqual(['', 'src', 'src/lib']);
+  });
+
+  /** fs.watch spy: records each watched path; `failAfter` throws ENOSPC from that call on. */
+  function spyWatch(failAfter = Infinity): { watch: typeof fs.watch; watched: string[]; open: () => number } {
+    const watched: string[] = [];
+    const live = new Set<fs.FSWatcher>();
+    const watch = ((p: fs.PathLike, ...rest: unknown[]) => {
+      if (watched.length >= failAfter) {
+        throw Object.assign(new Error('ENOSPC: System limit for number of file watchers reached'), { code: 'ENOSPC' });
+      }
+      watched.push(String(p));
+      const w = (fs.watch as (...a: unknown[]) => fs.FSWatcher)(p, ...rest);
+      live.add(w);
+      const close = w.close.bind(w);
+      w.close = () => {
+        live.delete(w);
+        close();
+      };
+      return w;
+    }) as unknown as typeof fs.watch;
+    return { watch, watched, open: () => live.size };
+  }
+
+  it('on linux watches each tree dir, never node_modules or .git, and follows new and removed dirs', async () => {
+    const spy = spyWatch();
+    const s = await setup(
+      { 'a.txt': 'a', 'src/b.ts': 'b', 'src/lib/c.ts': 'c', 'node_modules/pkg/index.js': 'x', '.gitignore': 'node_modules\n' },
+      { git: true, platform: 'linux', watch: spy.watch, gitIgnore: true },
+    );
+    await waitFor(() => spy.watched.length >= 3);
+    await sleep(100); // the disk walk for unindexed folders must not add node_modules
+    const rels = spy.watched.map((p) => path.relative(s.root, p).split(path.sep).join('/'));
+    expect(rels.sort()).toEqual(['', 'src', 'src/lib']);
+    // Changes in a nested known dir and in a new subtree are seen.
+    fs.writeFileSync(path.join(s.root, 'src/lib/d.ts'), 'd');
+    await waitFor(() => has(s.changes, 'add', 'src/lib/d.ts'));
+    fs.mkdirSync(path.join(s.root, 'x/y'), { recursive: true });
+    await waitFor(() => has(s.changes, 'addDir', 'x/y'));
+    fs.writeFileSync(path.join(s.root, 'x/y/z.txt'), 'z');
+    await waitFor(() => has(s.changes, 'add', 'x/y/z.txt'));
+    expect(spy.open()).toBe(5);
+    // A removed dir drops its watches (and its subtree's).
+    fs.rmSync(path.join(s.root, 'x'), { recursive: true });
+    await waitFor(() => has(s.changes, 'unlinkDir', 'x'));
+    expect(spy.open()).toBe(3);
+    await handles.pop()?.close();
+    expect(spy.open()).toBe(0);
+  });
+
+  it('on linux follows a renamed dir to its new path', async () => {
+    const s = await setup({ 'a.txt': 'a', 'old/f.txt': 'f', 'old/sub/g.txt': 'g' }, { platform: 'linux' });
+    age(s.root, 'old', 'old/f.txt', 'old/sub', 'old/sub/g.txt');
+    fs.renameSync(path.join(s.root, 'old'), path.join(s.root, 'new'));
+    await waitFor(() => s.changes.some((c) => c.type === 'moveDir' && c.path === 'new'));
+    fs.writeFileSync(path.join(s.root, 'new/sub/h.txt'), 'h');
+    await waitFor(() => has(s.changes, 'add', 'new/sub/h.txt'));
+    expect(s.changes.some((c) => c.path.startsWith('old/') && c.type === 'add')).toBe(false);
+  });
+
+  it('on linux a watch limit at start throws and leaves no watch open', async () => {
+    const root = makeRepo({ 'a.txt': 'a', 'src/b.ts': 'b', 'src/lib/c.ts': 'c' });
+    const index = new TreeIndex(await scanTree(root));
+    const spy = spyWatch(2);
+    expect(() => startWatcher({ root, index, onChange: () => {}, platform: 'linux', watch: spy.watch })).toThrow(/ENOSPC/);
+    expect(spy.watched).toHaveLength(2);
+    expect(spy.open()).toBe(0);
+  });
+
+  it('on linux a watch limit for a new dir is reported once through onDegraded and the rest keeps working', async () => {
+    const degraded: unknown[] = [];
+    const spy = spyWatch(1); // only the root
+    const s = await setup({ 'a.txt': 'a' }, { platform: 'linux', watch: spy.watch, onDegraded: (e) => degraded.push(e) });
+    fs.mkdirSync(path.join(s.root, 'n1'));
+    fs.mkdirSync(path.join(s.root, 'n2'));
+    await waitFor(() => has(s.changes, 'addDir', 'n1') && has(s.changes, 'addDir', 'n2'));
+    fs.writeFileSync(path.join(s.root, 'top.txt'), 't');
+    await waitFor(() => has(s.changes, 'add', 'top.txt'));
+    expect(degraded).toHaveLength(1);
+    expect(String((degraded[0] as Error).message)).toMatch(/ENOSPC/);
+  });
+
+  it('on linux watches folders the git index does not know (empty, unlisted, ignored skipped)', { timeout: 30_000 }, async () => {
+    // Regression: only folders holding a git-listed file were watched, so a file written
+    // into an existing empty folder was never reported.
+    const spy = spyWatch();
+    const s = await setup(
+      { 'a.txt': 'a', '.gitignore': 'build/\n', 'build/out.js': 'x' },
+      { git: true, platform: 'linux', watch: spy.watch, gitIgnore: true, emptyDirs: ['logs', 'deep/er/est', 'build/cache'] },
+    );
+    const rel = (p: string) => path.relative(s.root, p).split(path.sep).join('/');
+    await waitFor(() => spy.watched.map(rel).includes('deep/er/est'), 10_000);
+    const watched = spy.watched.map(rel).sort();
+    expect(watched).toEqual(['', 'deep', 'deep/er', 'deep/er/est', 'logs']);
+    expect(s.index.has('logs')).toBe(false);
+    fs.writeFileSync(path.join(s.root, 'logs/out.txt'), 'o');
+    await waitFor(() => has(s.changes, 'add', 'logs/out.txt'), 10_000);
+    fs.writeFileSync(path.join(s.root, 'deep/er/est/f.txt'), 'f');
+    await waitFor(() => has(s.changes, 'add', 'deep/er/est/f.txt'), 10_000);
+    expect(s.changes.some((c) => c.path.startsWith('build'))).toBe(false);
+  });
+
+  it('on linux a new subtree deeper than maxWalk still gets a watch on every folder', { timeout: 30_000 }, async () => {
+    const spy = spyWatch();
+    const root = makeRepo({ 'a.txt': 'a' });
+    const index = new TreeIndex(await scanTree(root));
+    const changes: DiskChange[] = [];
+    handles.push(
+      startWatcher({
+        root,
+        index,
+        maxWalk: 2,
+        platform: 'linux',
+        watch: spy.watch,
+        onChange: (c) => {
+          changes.push(c);
+          if (c.type === 'add') index.add(c.path, 'file');
+          else if (c.type === 'addDir') index.add(c.path, 'dir');
+        },
+      }),
+    );
+    // Let the event stream start before touching the disk (as setup does).
+    await sleep(300);
+    fs.mkdirSync(path.join(root, 'p/q/r/s/t'), { recursive: true });
+    const rel = (p: string) => path.relative(root, p).split(path.sep).join('/');
+    // Generous timeouts: under a full parallel run the platform's events can lag.
+    await waitFor(() => spy.watched.map(rel).includes('p/q/r/s/t'), 10_000);
+    fs.writeFileSync(path.join(root, 'p/q/r/s/t/late.txt'), 'l');
+    await waitFor(() => has(changes, 'add', 'p/q/r/s/t/late.txt'), 10_000);
   });
 });

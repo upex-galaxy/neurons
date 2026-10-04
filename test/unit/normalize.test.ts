@@ -4,7 +4,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bashPrograms } from '../../src/server/bash.ts';
-import { Normalizer, bashCommand, bashDetail, errorLine, parseHookPayload, promptDetail, toolInfo, type HookPayload } from '../../src/server/normalize.ts';
+import {
+  Normalizer,
+  bashCommand,
+  bashDetail,
+  errorLine,
+  parseHookPayload,
+  promptDetail,
+  redactSecrets,
+  toolInfo,
+  writesRedirect,
+  type HookPayload,
+} from '../../src/server/normalize.ts';
 import { createPathResolver, splitWorktreeRel } from '../../src/server/paths.ts';
 import { TreeIndex, scanTree } from '../../src/server/tree.ts';
 import type { VizEvent } from '../../src/shared/types.ts';
@@ -770,6 +781,181 @@ describe('bashCommand', () => {
     expect(bashCommand("echo 'never closed\nSECRET_TAIL")).toBe("echo '…");
     // Comments are not quotes.
     expect(bashCommand("# don't panic\nls")).toBe("# don't panic\nls");
+  });
+
+  /** Both outputs that leave the server must keep `secret` out. */
+  const neither = (command: string, secret: string): void => {
+    expect(bashCommand(command), `command: ${command}`).not.toContain(secret);
+    expect(bashDetail(command), `detail: ${command}`).not.toContain(secret);
+  };
+
+  it('decides writes for the whole command: a redirect or tee on another line still redacts (P1)', () => {
+    expect(bashCommand('{\n  echo "SECRET_C"\n  echo "SECRET_D"\n} > f')).toBe('{\n  echo …\n  echo …\n} > f');
+    expect(bashCommand("while read l; do\n  printf '%s\\n' \"SECRET_E\"\ndone > out")).toBe('while read l; do\n  printf …\ndone > out');
+    neither('if true; then echo "SECRET_X"\nfi > f', 'SECRET_X');
+    neither("printf '%s' \"SECRETa\" |\n  sudo tee /etc/x", 'SECRETa');
+    expect(bashDetail("printf '%s' \"SECRETa\" |\n  sudo tee /etc/x")).toBe('printf … | …');
+    neither('{\n  echo UNQUOTED_SECRET\n} >> notes.txt', 'UNQUOTED_SECRET');
+    neither('cat <<EOF\nHEREDOC_SECRET\nEOF\necho "LINE_SECRET" | tee -a f', 'LINE_SECRET');
+    neither("python3 \\\n  -c 'open(\"f\",\"w\").write(\"CONT_SECRET\")'", 'CONT_SECRET');
+    // Nothing writes: lines stay as typed.
+    expect(bashCommand('echo "building"\nnpm run build')).toBe('echo "building"\nnpm run build');
+  });
+
+  it('redacts echo/printf arguments after then, do, {, (, time, command and case labels (P2)', () => {
+    for (const [cmd, secret] of [
+      ['if true; then echo SECRET_A > f; fi', 'SECRET_A'],
+      ['for i in 1; do echo SECRET_B >> f; done', 'SECRET_B'],
+      ['{ echo SECRET57; } > f', 'SECRET57'],
+      ['(echo SECRET58) > f', 'SECRET58'],
+      ['time echo SECRET_I > f', 'SECRET_I'],
+      ['command echo SECRET_J > f', 'SECRET_J'],
+      ['case x in a) echo SECRETcc > f;; esac', 'SECRETcc'],
+      ['if [ ! -f .env ]; then echo API_KEY=sk-123 > .env; fi', 'sk-123'],
+      ['echo SECRET_K \\\n  MORE_SECRET > f', 'MORE_SECRET'],
+    ] as const) {
+      neither(cmd, secret);
+    }
+    expect(bashCommand('if true; then echo SECRET_A > f; fi')).toBe('if true; then echo … > f; fi');
+    expect(bashCommand('(echo SECRET58) > f')).toBe('(echo …) > f');
+  });
+
+  it('treats &>, &>>, 1>, 1>> and a > glued to a word as file writes (P3)', () => {
+    for (const cmd of ['echo SECRET32 &> f', 'echo SECRET32 &>> f', 'echo SECRET31 1> f', 'echo SECRET31 1>> f', 'echo SECRET33 >| f', 'echo SECRET34 >&out.log']) {
+      neither(cmd, 'SECRET3');
+    }
+    neither('echo PORT=3000>.env', 'PORT=3000');
+    neither('echo v1.2.3>VERSION', 'v1.2.3');
+    expect(bashCommand('echo SECRET31 1> f')).toBe('echo … 1> f');
+    // fd redirects and /dev/null are still not writes.
+    expect(writesRedirect('ls > /dev/null 2>&1')).toBe(false);
+    expect(writesRedirect('npm test 2>&1 | head')).toBe(false);
+    expect(writesRedirect('cmd 2> err.log')).toBe(false);
+    expect(writesRedirect('echo x >&2')).toBe(false);
+    expect(writesRedirect('exec 3>&-')).toBe(false);
+    expect(writesRedirect('echo 3000>.env')).toBe(false); // fd 3000, writes nothing
+    expect(writesRedirect('cmd &>/dev/null')).toBe(false);
+    expect(writesRedirect('cmd &> out.log')).toBe(true);
+    expect(writesRedirect('cmd 1>out')).toBe(true);
+    expect(writesRedirect('cmd >>out')).toBe(true);
+  });
+
+  it('knows more inline-code interpreters, flags in any case, and sponge / dd of= writers (P4)', () => {
+    for (const [cmd, secret] of [
+      [`php -r 'file_put_contents("f","SECRETd");'`, 'SECRETd'],
+      ["perl -nE 'print \"SECRETf\"'", 'SECRETf'],
+      [`Rscript -e 'writeLines("SECRETq","f")'`, 'SECRETq'],
+      ["lua -e 'io.open(\"f\",\"w\"):write(\"SECRET1\")'", 'SECRET1'],
+      ["swift -e 'print(\"SECRET2\")'", 'SECRET2'],
+      ["julia -e 'write(\"f\", \"SECRET3\")'", 'SECRET3'],
+      ['powershell -c "SECRET39 | Out-File f"', 'SECRET39'],
+      ['pwsh -Command "Set-Content f SECRET38"', 'SECRET38'],
+      ['pwsh -EncodedCommand "SECRET40"', 'SECRET40'],
+      ['cmd /c "echo SECRET41 > f"', 'SECRET41'],
+      ['printf SECRET24 | dd of=f', 'SECRET24'],
+      ['echo -e "a\\nSECRET23" | sponge f', 'SECRET23'],
+    ] as const) {
+      neither(cmd, secret);
+    }
+  });
+
+  it('redacts values that look like secrets in any command (P6)', () => {
+    for (const [cmd, secret] of [
+      ['curl -H "Authorization: Bearer abc123def" https://api.x.com', 'abc123def'],
+      ['export GITHUB_TOKEN=ghp_secret123 && gh api user', 'ghp_secret123'],
+      ['DB_PASSWORD="hunter2 x" npm run migrate', 'hunter2'],
+      ['mysql --password=hunter3 -u root', 'hunter3'],
+      ['npm publish --otp 123456 --auth-token tok_abcdef', 'tok_abcdef'],
+      ['git clone https://user:hunter4pw@github.com/x.git', 'hunter4pw'],
+      ['curl -u admin:pa55word https://x', 'pa55word'],
+      ['curl "https://api.x.com/v1?api_key=QUERYSECRET"', 'QUERYSECRET'],
+      ['gh secret set X --body ghp_ABCDEFGHIJKLMNOPQRSTUV', 'ghp_ABCDEFGHIJKLMNOPQRSTUV'],
+      ['claude --model x sk-ant-api03-ABCDEFGHIJKLMNOP', 'sk-ant-api03-ABCDEFGHIJKLMNOP'],
+    ] as const) {
+      neither(cmd, secret);
+    }
+    expect(redactSecrets('export GITHUB_TOKEN=abc && ls')).toBe('export GITHUB_TOKEN=… && ls');
+    // Names that only look close are kept.
+    expect(bashCommand('git commit --author "Ada Lovelace" -m "fix"')).toBe('git commit --author "Ada Lovelace" -m "fix"');
+    expect(bashCommand('git log --oneline -5')).toBe('git log --oneline -5');
+  });
+
+  it('redacts printer args after a redirect, escaped operators and path-prefixed commands (round 4 review)', () => {
+    for (const cmd of [
+      'echo > f MRKSEC',
+      'echo >f MRKSEC',
+      "printf '%s' >f MRKSEC",
+      'echo 2>/dev/null MRKSEC > f',
+      'echo a 2>&1 MRKSEC > f',
+      'echo a <in MRKSEC > f',
+      'echo $((1<<2)) MRKSEC > f',
+      'echo a\\|MRKSEC > f',
+      'echo a\\&MRKSEC > f',
+      'echo a\\>MRKSEC > f',
+      '/bin/echo MRKSEC > f',
+      '/usr/bin/printf MRKSEC > f',
+      '\\echo MRKSEC > f',
+      'echo MRKSEC | /usr/bin/tee f',
+      'echo MRKSEC | \\tee f',
+      "/usr/bin/sed -i 's/x/MRKSEC/' f",
+      "sed --in-place 's/x/MRKSEC/' f",
+      "gsed -i 's/x/MRKSEC/' f",
+      'exec 3>f\necho MRKSEC >&3',
+      'echo $(echo MRKSEC) > f',
+      'echo `echo MRKSEC` > f',
+      'cat <(echo MRKSEC) > f',
+    ]) {
+      neither(cmd, 'MRKSEC');
+    }
+    expect(bashCommand('echo > f MRKSEC')).toBe('echo > f …');
+    expect(bashCommand('echo a 2>&1 MRKSEC > f')).toBe('echo … 2>&1 … > f');
+    expect(bashCommand('/bin/echo MRKSEC > f')).toBe('/bin/echo … > f');
+    expect(writesRedirect('echo x >&3')).toBe(true);
+    expect(writesRedirect('cmd 3> f')).toBe(false);
+    expect(writesRedirect('exec 3>&-')).toBe(false);
+  });
+
+  it('redacts the data a command feeds to inline code, and more writers (round 4 review)', () => {
+    for (const cmd of [
+      `printf "%s" MRKSEC | python3 -c 'import sys;open("f","w").write(sys.stdin.read())'`,
+      `python3 -c 'import sys;open(sys.argv[1],"w").write(sys.argv[2])' f MRKSEC`,
+      `node -e 'require("fs").writeFileSync(process.argv[1], process.argv[2])' f MRKSEC`,
+      `sh -c 'echo "$1" > f' _ MRKSEC`,
+      `deno eval "Deno.writeTextFileSync('f','MRKSEC')"`,
+      `echo 'open("f","w").write("MRKSEC")' | python3`,
+      "printf 'a\\nMRKSEC\\n.\\nw\\n' | ed -s f",
+      'echo MRKSEC | cp /dev/stdin f',
+      'echo MRKSEC | install -m 644 /dev/stdin f',
+      'cp <(printf MRKSEC) f',
+      "vim -c 'normal iMRKSEC' -c wq f",
+      "ex -sc 'normal iMRKSEC|x' f",
+      "sd 'x' 'MRKSEC' f",
+      'yes MRKSEC | head -1 > f',
+      "awk -v s=MRKSEC 'BEGIN{print s}' > f",
+    ]) {
+      neither(cmd, 'MRKSEC');
+    }
+    expect(bashCommand(`python3 -c 'x' f MRKSEC`)).toBe("python3 -c '…' …");
+    expect(bashCommand("awk -v s=MRKSEC 'BEGIN{print s}' > f")).toBe("awk -v s=… '…' > f");
+    // Running a script file is not inline code: its arguments stay.
+    expect(bashCommand('python3 scripts/gen.py --out x')).toBe('python3 scripts/gen.py --out x');
+  });
+
+  it('does not blank plain words that only look like secret syntax (round 4 review)', () => {
+    expect(bashCommand('git commit -m "add basic validation"')).toBe('git commit -m "add basic validation"');
+    expect(bashCommand('rg cookie: src/server')).toBe('rg cookie: src/server');
+    expect(bashCommand('rg "Authorization: header handling" src')).toBe('rg "Authorization: header handling" src');
+    expect(bashCommand('pg_dump --primary-key id')).toBe('pg_dump --primary-key id');
+    // The real ones are still blanked.
+    expect(bashCommand('curl -H "Cookie: s=abcdef" https://x')).toBe('curl -H "Cookie: …" https://x');
+    expect(redactSecrets('grep "Bearer eyJhbGciOiJIUzI1NiJ9.x" log')).toBe('grep "Bearer …" log');
+    expect(redactSecrets('tool --api-key abc --sort-key name')).toBe('tool --api-key … --sort-key name');
+  });
+
+  it('bashDetail honors \\\' inside $\'...\' (P7)', () => {
+    neither("echo $'SECRET45\\'' > f", 'SECRET45');
+    neither("printf $'a\\'b SECRET46' >> out.txt", 'SECRET46');
+    expect(bashDetail("echo $'SECRET45\\'' > f")).toBe('echo … > f');
   });
 });
 
