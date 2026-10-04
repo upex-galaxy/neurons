@@ -71,7 +71,7 @@ La [guía de uso](docs/guide.html) cubre la instalación, el uso diario y un FAQ
 
 ## Sistemas operativos
 
-Verificado en macOS (Apple Silicon). En Linux debería andar, pero todavía no se corrió. El soporte de Windows es experimental y no está probado; la guía lista [las limitaciones conocidas](docs/guide.html#faq-os).
+Verificado en macOS (Apple Silicon). En Linux pasa toda la suite de tests en CI, y en Windows pasan los tests unitarios y de integración; en ninguno de los dos se probó todavía una sesión real de Claude Code. La guía lista [los detalles y las limitaciones conocidas](docs/guide.html#faq-os).
 
 ## Desarrollo
 

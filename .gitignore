@@ -6,3 +6,6 @@ test-results/
 playwright-report/
 *.log
 .DS_Store
+
+# Claude Code subagent worktrees
+.claude/worktrees/

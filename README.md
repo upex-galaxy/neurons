@@ -71,7 +71,7 @@ The [user guide](docs/guide.html) covers setup, daily use and a long FAQ: what e
 
 ## Operating systems
 
-Verified on macOS (Apple Silicon). Linux is expected to work but has not been run yet. Windows support is experimental and untested; the guide lists [the known limits](docs/guide.html#faq-os).
+Verified on macOS (Apple Silicon). The full test suite passes on Linux in CI, and unit and integration tests pass on Windows; neither has been tried with a real Claude Code session yet. The guide lists [the details and known limits](docs/guide.html#faq-os).
 
 ## Development
 
