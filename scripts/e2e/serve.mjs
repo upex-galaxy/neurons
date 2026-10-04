@@ -22,11 +22,11 @@ const CLI = path.resolve(HERE, '../../dist/cli.mjs');
 
 const [mode, portArg] = process.argv.slice(2);
 if (!['live', 'replay', 'perf'].includes(mode ?? '') || !/^\d+$/.test(portArg ?? '')) {
-  process.stderr.write('Uso: node scripts/e2e/serve.mjs <live|replay|perf> <puerto>\n');
+  process.stderr.write('Usage: node scripts/e2e/serve.mjs <live|replay|perf> <port>\n');
   process.exit(2);
 }
 if (!fs.existsSync(CLI)) {
-  process.stderr.write('Falta dist/cli.mjs: ejecutá npm run build antes de las pruebas e2e.\n');
+  process.stderr.write('dist/cli.mjs is missing: run npm run build before the e2e tests.\n');
   process.exit(2);
 }
 const port = Number(portArg);
@@ -73,7 +73,7 @@ async function waitHealth(p, timeoutMs = 20000) {
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`el servidor no respondió en el puerto ${p}`);
+  throw new Error(`the server did not answer on port ${p}`);
 }
 
 /**
@@ -90,7 +90,7 @@ async function recordLog() {
       headers: { 'content-type': 'application/json' },
       body,
     });
-    if (res.status !== 204) throw new Error(`POST /hook devolvió ${res.status}`);
+    if (res.status !== 204) throw new Error(`POST /hook returned ${res.status}`);
     await new Promise((r) => setTimeout(r, 200));
   }
   // Let the server write the last lines, then stop it.
@@ -111,9 +111,9 @@ function cleanup() {
 
 function verifyUntouched() {
   const problems = [];
-  if (!fs.existsSync(settingsFile) || fs.readFileSync(settingsFile, 'utf8') !== SENTINEL_SETTINGS) problems.push(`${settingsFile} cambió`);
-  if (fs.existsSync(path.join(realRepo, '.claude', 'settings.local.json'))) problems.push('se creó .claude/settings.local.json');
-  for (const p of problems) process.stderr.write(`[e2e] ERROR: ${p} con --no-install\n`);
+  if (!fs.existsSync(settingsFile) || fs.readFileSync(settingsFile, 'utf8') !== SENTINEL_SETTINGS) problems.push(`${settingsFile} changed`);
+  if (fs.existsSync(path.join(realRepo, '.claude', 'settings.local.json'))) problems.push('.claude/settings.local.json was created');
+  for (const p of problems) process.stderr.write(`[e2e] ERROR: ${p} with --no-install\n`);
   return problems.length === 0;
 }
 
@@ -140,7 +140,7 @@ try {
   }
   child?.once('exit', (code) => {
     if (stopping) return;
-    process.stderr.write(`[e2e] el CLI terminó solo (código ${code})\n`);
+    process.stderr.write(`[e2e] the CLI exited on its own (code ${code})\n`);
     cleanup();
     process.exit(1);
   });

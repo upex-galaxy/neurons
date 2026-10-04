@@ -883,8 +883,8 @@ describe('Neurons CLI: routing, repo root, sessions and the viewer registry', ()
       const r = run(['start', repo, '--no-open', '--no-bash-diff', '--port', '0'], cfg, { env });
       await r.waitFor(/Ctrl\+C para salir/);
       expect(r.output()).toContain(`Hay 1 sesión de Claude Code abierta en este repositorio (PID ${fake.pid}).`);
-      expect(r.output()).toContain('Toma los hooks en vivo, sin reiniciar (verificado con Claude Code 2.1.288).');
-      expect(r.output()).toContain('Si con una versión anterior no ves eventos, reiniciala: /exit y después claude --continue.');
+      expect(r.output()).toContain('Toma los hooks en vivo, sin reiniciar (verificado con Claude Code 2.1.288 en macOS).');
+      expect(r.output()).toContain('Si no muestra eventos, corré /reload-plugins en esa sesión; si no alcanza, /exit y después claude --continue.');
       expect(r.output()).not.toContain(String(other.pid));
       r.child.kill('SIGTERM');
       expect((await r.exited).code).toBe(0);

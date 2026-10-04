@@ -1,6 +1,6 @@
 # repo-synapse: implementation plan
 
-> On 2026-10-03 the product was renamed **Neurons** (command `neu`). This plan stays as it was written, with the names of the time: `repo-synapse` is now `neu`, `.repo-synapse/` is `.neurons/` and `?src=repo-synapse` is `?src=neurons`. The rename and the compatibility with the old names are in `DECISIONS.md` (I28). What changed in 0.3 (bilingual UI, docs routes, Timeline, tool tracking, command detail, now stream, resizable panel, cross-platform work) is in `DECISIONS.md`, I40 to I48.
+> On 2026-10-03 the product was renamed **Neurons** (command `neu`). This plan stays as it was written, with the names of the time: `repo-synapse` is now `neu`, `.repo-synapse/` is `.neurons/` and `?src=repo-synapse` is `?src=neurons`. The rename and the compatibility with the old names are in `DECISIONS.md` (I28). What changed in 0.3.0 (bilingual UI, docs routes, Timeline, tool tracking, command detail, now stream, resizable panel, cross-platform work) is in `DECISIONS.md`, from I40 on. `docs/DEMO.md` was removed in 0.3.0: its demo prompts now live in the guide, `docs/guide.html#faq-demo` (a throwaway clone of Neurons) and `#faq-demo-small` (the repo from `scripts/make-demo-repo.sh`), so the `DEMO.md` mentions below (step 13 and the smoke test) point there.
 
 Final plan, written before implementing. It starts from the original idea document and corrects it with what was verified against the official documentation (`code.claude.com/docs/en/hooks`, `hooks-guide`, `settings`) and against the installed binary (`claude 2.1.285`, macOS arm64). The decisions and their reasons are in `DECISIONS.md`.
 
@@ -177,4 +177,4 @@ WS messages server -> client: `hello` (root, tree, last 500 events, sessions), `
 | Claude's `rm` = attributed `delete`; external `rm` is not | Integration with a Bash window open vs closed |
 | install keeps, uninstall restores | Byte for byte unit tests |
 | 2,000 files at 30 fps | Measured in a browser with a GPU, recorded in `DECISIONS.md` |
-| `npm test` passes | Local CI (since 0.3 also GitHub Actions, `.github/workflows/ci.yml`) |
+| `npm test` passes | Local CI (since 0.3.0 also GitHub Actions, `.github/workflows/ci.yml`) |

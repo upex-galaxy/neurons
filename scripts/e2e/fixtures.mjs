@@ -30,7 +30,7 @@ export const PROBE_FILES = {
 /** Root of every e2e temp dir for this Playwright run (set by playwright.config.ts). */
 export function e2eDir() {
   const dir = process.env.RS_E2E_DIR;
-  if (!dir) throw new Error('RS_E2E_DIR no está definido: corré las pruebas con playwright test');
+  if (!dir) throw new Error('RS_E2E_DIR is not set: run the tests with playwright test');
   return dir;
 }
 

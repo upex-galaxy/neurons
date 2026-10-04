@@ -6,7 +6,7 @@ Neurons muestra en vivo lo que hace Claude Code dentro de un repositorio. Corré
 
 ![Neurons mostrando su propio repositorio como una red, con el panel de actividad a la derecha](docs/img/live.png)
 
-Sirve para mirar cómo trabaja el agente: qué lee primero, cuánto explora antes de editar, qué instrucciones se cargan solas y qué hacen sus subagentes. Corre en tu máquina y solo maneja rutas, nunca el contenido de los archivos.
+Sirve para mirar cómo trabaja el agente: qué lee primero, cuánto explora antes de editar, qué instrucciones se cargan solas y qué hacen sus subagentes. Corre en tu máquina y no guarda el contenido de los archivos: guarda rutas, metadatos y los comandos de Bash que corrió Claude, con lo que escriben tapado (un filtro que hace lo que puede, ver la [guía](docs/guide.html#faq-content)).
 
 ## Instalalo con tu IA
 
@@ -48,7 +48,7 @@ cd ~/proyectos/mi-repo
 neu                 # levanta el visor y abre http://127.0.0.1:7777
 ```
 
-Después abrí Claude Code en ese repo, en otra terminal, como siempre. Una sesión que ya estaba abierta toma los hooks sin reiniciar. `Ctrl+C`, o `neu stop` desde cualquier otra terminal, cierra el visor y quita sus hooks.
+Después abrí Claude Code en ese repo, en otra terminal, como siempre. Una sesión que ya estaba abierta toma los hooks sin reiniciar (verificado con Claude Code 2.1.288 en macOS). Si no muestra eventos, corré `/reload-plugins` en ella; si no alcanza, `/exit` y después `claude --continue`. `Ctrl+C`, o `neu stop` desde cualquier otra terminal, cierra el visor y quita sus hooks.
 
 | Comando | Qué hace |
 |---|---|
