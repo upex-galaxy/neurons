@@ -11,6 +11,8 @@ const AGENT_ID = 'aa2b318dfea4c1d08';
 const NEW_FILE = 'src/api/health.ts';
 
 test.describe.configure({ mode: 'serial' });
+// The assertions read the Spanish labels: a Spanish browser picks them (web/src/i18n.ts).
+test.use({ locale: 'es-AR' });
 
 let repo: string;
 let run1: string[];
@@ -39,7 +41,7 @@ function rgb(hex: string): string {
 }
 
 // First on purpose: the server is fresh, so these are the only two sessions it has seen.
-test('dos sesiones en el mismo repo: un tono por sesión en el estado y en el feed', async ({ page, request }) => {
+test('two sessions in the same repo: one tint per session in the state and the feed', async ({ page, request }) => {
   await openViewer(page, PORT);
   const s1 = (JSON.parse(run1[0]!) as { session_id: string }).session_id;
   const s2 = '7c1e5a90-0b6e-4d3f-9a43-2f6c1d8e7b21';
@@ -68,7 +70,7 @@ test('dos sesiones en el mismo repo: un tono por sesión en el estado y en el fe
   await expect(chip).toHaveCSS('color', rgb('#22d3ee'));
 });
 
-test('hooks reales: feed, contadores, nodos activos, creados y borrados', async ({ page, request }) => {
+test('real hooks: feed, counters, active, created and deleted nodes', async ({ page, request }) => {
   await openViewer(page, PORT);
   const base = await vizState(page);
   const feedRow = (chip: string, p: string) =>
@@ -160,7 +162,7 @@ test('hooks reales: feed, contadores, nodos activos, creados y borrados', async 
   });
 });
 
-test('un cambio externo en disco aparece como externo y se oculta con el toggle', async ({ page }) => {
+test('an external disk change shows as external and hides with the toggle', async ({ page }) => {
   await openViewer(page, PORT);
   // Past the 600 ms grace of the last Bash window of the previous test.
   await sleep(800);
@@ -184,7 +186,7 @@ test('un cambio externo en disco aparece como externo y se oculta con el toggle'
   fs.rmSync(path.join(repo, rel));
 });
 
-test('el botón "Reproducir log" reproduce el registro en vivo', async ({ page }) => {
+test('the "Reproducir log" button replays the live log', async ({ page }) => {
   await openViewer(page, PORT);
   await page.getByRole('button', { name: 'Reproducir log' }).click();
   await expect.poll(async () => (await vizState(page)).replay.active).toBe(true);

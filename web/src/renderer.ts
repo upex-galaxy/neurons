@@ -4,6 +4,8 @@ import type { PulseOptions } from './glow.ts';
 import { OUTSIDE_HUB_ID, ROOT_ID, type GraphData, type VizLink, type VizNode } from './treeModel.ts';
 
 export type RendererKind = '3d' | '2d';
+/** What fills the stage: one of the graph renderers or the Timeline. */
+export type ViewKind = RendererKind | 'timeline';
 
 export interface ParticleStyle {
   color: string;
@@ -18,6 +20,8 @@ export interface RendererOptions {
   /** Hover label (HTML-escaped text). */
   label(node: VizNode): string;
   onNodeClick(node: VizNode): void;
+  /** Nodes that react to a click get the pointer cursor. */
+  clickable(node: VizNode): boolean;
 }
 
 export interface Renderer {
@@ -31,6 +35,15 @@ export interface Renderer {
   cancelFade(id: string): void;
   /** Briefly lights a link (moves). */
   flashLink(link: VizLink, color: string, durationMs: number): void;
+  /**
+   * Tints links that a particle chain just crossed and fades them over `durationMs`. A link
+   * that is still tinted takes the new color and restarts its fade.
+   */
+  trailLinks(links: readonly VizLink[], color: string, durationMs: number): void;
+  /** Eases the camera toward a node (closer in 3D, centered in 2D). */
+  focus(node: VizNode, ms: number): void;
+  /** Settles the layout faster for `ms` (after a collapse toggle), then restores it. */
+  calm(ms: number): void;
   /** Drops per-node state for purged nodes. */
   forget(ids: string[]): void;
   /** Re-reads node flags (collapsed) after a change. */
@@ -42,6 +55,12 @@ export interface Renderer {
   screenCoords(node: VizNode): { x: number; y: number } | null;
   onFirstLayout(cb: () => void): void;
   zoomToFit(ms?: number): void;
+  /**
+   * Stops (true) or resumes (false) the render and layout loops while another view (the
+   * Timeline) covers the graph. Model, heat and effects keep their state meanwhile;
+   * particles and link flashes asked for while paused are dropped (nothing would move them).
+   */
+  setPaused(paused: boolean): void;
   dispose(): void;
 }
 

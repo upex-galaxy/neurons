@@ -5,8 +5,10 @@ import { E2E_PORTS } from '../../scripts/e2e/fixtures.mjs';
 import { openViewer, sleep, vizState } from './helpers.ts';
 
 const PORT = E2E_PORTS.replay;
+// The assertions read the Spanish labels: a Spanish browser picks them (web/src/i18n.ts).
+test.use({ locale: 'es-AR' });
 
-test('replay: la reproducción avanza, pausa y respeta la velocidad', async ({ page }) => {
+test('replay: playback advances, pauses and honors the speed', async ({ page }) => {
   await openViewer(page, PORT);
   await expect(page.locator('#mode')).toHaveText('Repetición');
   await expect(page.locator('#replay-bar')).toBeVisible();

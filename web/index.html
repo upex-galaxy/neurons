@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -13,44 +13,92 @@
         <span class="logo" aria-hidden="true"></span>
         <strong>Neurons</strong>
         <span id="repo-name" class="repo-name">—</span>
-        <span id="mode" class="chip">En vivo</span>
-        <span id="truncated" class="chip warn" hidden>Árbol truncado</span>
+        <span id="mode" class="chip" data-i18n="mode.live"></span>
+        <span id="truncated" class="chip warn" data-i18n="top.truncated" hidden></span>
       </div>
       <div class="meta">
-        <span id="node-count">0 nodos</span>
-        <span id="fps">0 fps</span>
-        <button id="replay-open" class="btn" type="button">Reproducir log</button>
+        <span id="node-count"></span>
+        <span id="fps"></span>
+        <button id="replay-open" class="btn" type="button" data-i18n="top.replayOpen"></button>
         <span id="status" class="status" data-status="connecting">
           <span class="dot" aria-hidden="true"></span>
-          <span id="status-text">Conectando…</span>
+          <span id="status-text"></span>
         </span>
-        <button id="panel-toggle" class="btn" type="button" aria-controls="panel" aria-expanded="true">Panel</button>
+        <nav class="top-links" data-i18n-aria="top.links">
+          <a id="link-help" class="btn link" href="./help" target="_blank" rel="noopener" data-i18n="top.help" data-i18n-title="top.helpTitle"></a>
+          <a id="link-arch" class="btn link" href="./architecture" target="_blank" rel="noopener" data-i18n="top.architecture" data-i18n-title="top.architectureTitle"></a>
+        </nav>
+        <div id="lang-toggle" class="lang-toggle" role="group" data-i18n-aria="lang.group">
+          <button class="btn" type="button" data-lang="en" lang="en" data-i18n="lang.en" data-i18n-title="lang.enTitle" aria-pressed="false"></button>
+          <button class="btn" type="button" data-lang="es" lang="es" data-i18n="lang.es" data-i18n-title="lang.esTitle" aria-pressed="false"></button>
+        </div>
+        <button id="panel-toggle" class="btn" type="button" aria-controls="panel" aria-expanded="true" data-i18n="top.panel"></button>
       </div>
     </header>
 
     <main id="stage">
-      <div id="graph" aria-label="Grafo del repositorio"></div>
+      <div id="graph" data-i18n-aria="graph.aria"></div>
 
-      <div id="replay-bar" class="replay-bar" role="region" aria-label="Controles de repetición" hidden>
+      <section id="timeline" class="timeline" hidden>
+        <canvas class="tl-canvas" tabindex="0" role="img"></canvas>
+        <div class="tl-controls" role="group" data-i18n-aria="timeline.controls">
+          <button class="btn icon" type="button" data-tl="zoom-out" data-i18n-title="timeline.zoomOut" data-i18n-aria="timeline.zoomOut">−</button>
+          <button class="btn icon" type="button" data-tl="zoom-in" data-i18n-title="timeline.zoomIn" data-i18n-aria="timeline.zoomIn">+</button>
+          <button class="btn" type="button" data-tl="follow" aria-pressed="true" data-i18n-title="timeline.followTitle"></button>
+        </div>
+        <div class="tl-empty" hidden>
+          <h3 class="tl-empty-title"></h3>
+          <p class="tl-empty-body"></p>
+          <ul class="tl-empty-legend" aria-hidden="true">
+            <li><i class="tl-key dot"></i><span data-i18n="action.read"></span></li>
+            <li><i class="tl-key bar"></i><span data-i18n="action.edit"></span></li>
+            <li><i class="tl-key plus">+</i><span data-i18n="action.create"></span></li>
+            <li><i class="tl-key cross">×</i><span data-i18n="action.delete"></span></li>
+            <li><i class="tl-key ring"></i><span data-i18n="action.search"></span></li>
+            <li><i class="tl-key hollow"></i><span data-i18n="timeline.keyPre"></span></li>
+          </ul>
+        </div>
+        <div class="tl-tip" role="tooltip" hidden></div>
+      </section>
+
+      <div id="toasts" class="toasts" aria-live="polite"></div>
+
+      <section id="stream" class="stream" data-i18n-aria="stream.aria"></section>
+
+      <aside id="detail" class="detail" tabindex="-1" aria-labelledby="detail-title" aria-hidden="true">
+        <header class="detail-head">
+          <button id="detail-back" class="icon-btn back-btn" type="button" data-i18n-title="detail.back" data-i18n-aria="detail.back" hidden></button>
+          <h2 id="detail-title"></h2>
+          <div class="detail-nav">
+            <button id="detail-prev" class="icon-btn prev-btn" type="button" data-i18n-title="detail.prev" data-i18n-aria="detail.prev"></button>
+            <button id="detail-next" class="icon-btn next-btn" type="button" data-i18n-title="detail.next" data-i18n-aria="detail.next"></button>
+            <button id="detail-close" class="icon-btn close-btn" type="button" data-i18n-title="detail.close" data-i18n-aria="detail.close"></button>
+          </div>
+        </header>
+        <div id="detail-body" class="detail-body"></div>
+        <p class="detail-hint" data-i18n="detail.hint"></p>
+      </aside>
+
+      <div id="replay-bar" class="replay-bar" role="region" data-i18n-aria="replay.aria" hidden>
         <div class="rp-row">
-          <button id="rp-play" class="btn primary" type="button" aria-pressed="false">Reproducir</button>
-          <button id="rp-restart" class="btn" type="button">Reiniciar</button>
-          <div class="speeds" role="group" aria-label="Velocidad">
+          <button id="rp-play" class="btn primary" type="button" aria-pressed="false"></button>
+          <button id="rp-restart" class="btn" type="button" data-i18n="replay.restart"></button>
+          <div class="speeds" role="group" data-i18n-aria="replay.speed">
             <button class="btn" type="button" data-speed="1" aria-pressed="true">1x</button>
             <button class="btn" type="button" data-speed="2" aria-pressed="false">2x</button>
             <button class="btn" type="button" data-speed="5" aria-pressed="false">5x</button>
           </div>
           <span id="rp-time" class="rp-time">00:00 / 00:00</span>
-          <span id="rp-clock" class="rp-clock" title="Hora original del log"></span>
-          <select id="rp-segment" aria-label="Tramo del log" hidden></select>
-          <button id="rp-exit" class="btn" type="button">Volver al vivo</button>
+          <span id="rp-clock" class="rp-clock" data-i18n-title="replay.clockTitle"></span>
+          <select id="rp-segment" data-i18n-aria="replay.segmentAria" hidden></select>
+          <button id="rp-exit" class="btn" type="button" data-i18n="replay.exit"></button>
         </div>
         <div
           id="rp-progress"
           class="progress"
           role="slider"
           tabindex="0"
-          aria-label="Progreso de la repetición"
+          data-i18n-aria="replay.progressAria"
           aria-valuemin="0"
           aria-valuemax="100"
           aria-valuenow="0"
@@ -62,45 +110,78 @@
       </div>
     </main>
 
-    <aside id="panel" aria-label="Actividad">
+    <aside id="panel" data-i18n-aria="panel.aria">
+      <div id="panel-resize" class="panel-resize" role="separator" aria-orientation="vertical" aria-controls="panel" tabindex="0"></div>
       <section class="filters">
-        <h2>Filtros</h2>
+        <h2 data-i18n="panel.filters"></h2>
         <label class="field">
-          <span>Sesión <i id="f-session-dot" class="sess-dot" aria-hidden="true" hidden></i></span>
+          <span><span data-i18n="panel.session"></span> <i id="f-session-dot" class="sess-dot" aria-hidden="true" hidden></i></span>
           <select id="f-session"></select>
         </label>
         <label class="field">
-          <span>Agente</span>
+          <span data-i18n="panel.agent"></span>
           <select id="f-agent"></select>
         </label>
         <label class="toggle">
           <input id="f-external" type="checkbox" checked />
-          <span>Mostrar cambios externos</span>
+          <span data-i18n="panel.showExternal"></span>
         </label>
-        <div class="view-toggle" role="group" aria-label="Vista">
+        <div class="view-toggle" role="group" data-i18n-aria="panel.view">
           <button class="btn" type="button" data-view="3d" aria-pressed="true">3D</button>
           <button class="btn" type="button" data-view="2d" aria-pressed="false">2D</button>
+          <button class="btn" type="button" data-view="timeline" aria-pressed="false" data-i18n="view.timeline" data-i18n-title="view.timelineTitle"></button>
         </div>
+        <label class="toggle">
+          <input id="f-stream" type="checkbox" checked />
+          <span data-i18n="panel.liveStream"></span>
+        </label>
         <div id="session-legend" class="session-legend" hidden>
-          <span class="sess-legend-label">Sesiones</span>
-          <span id="session-chips" class="sess-chips" role="group" aria-label="Sesiones activas"></span>
+          <span class="sess-legend-label" data-i18n="panel.sessions"></span>
+          <span id="session-chips" class="sess-chips" role="group" data-i18n-aria="panel.activeSessions"></span>
         </div>
       </section>
-      <section>
-        <h2>Contadores</h2>
-        <ul id="counters" class="counters"></ul>
-      </section>
+      <div class="panel-scroll">
+        <section>
+          <h2 data-i18n="panel.counters"></h2>
+          <ul id="counters" class="counters"></ul>
+        </section>
+        <section class="tools-section">
+          <h2 data-i18n="tools.title"></h2>
+          <div id="tools" class="tools">
+            <details class="tool-group" data-tools="skills" open>
+              <summary><span data-i18n="tools.skills"></span><span class="tool-total count">0</span></summary>
+              <ul class="tool-list"></ul>
+            </details>
+            <details class="tool-group" data-tools="mcp" open>
+              <summary><span data-i18n="tools.mcp"></span><span class="tool-total count">0</span></summary>
+              <ul class="tool-list"></ul>
+            </details>
+            <details class="tool-group" data-tools="cli">
+              <summary><span data-i18n="tools.cli"></span><span class="tool-total count">0</span></summary>
+              <ul class="tool-list"></ul>
+            </details>
+            <details class="tool-group" data-tools="builtin">
+              <summary><span data-i18n="tools.builtin"></span><span class="tool-total count">0</span></summary>
+              <ul class="tool-list"></ul>
+            </details>
+          </div>
+        </section>
+      </div>
       <section class="feed-section">
-        <h2>Actividad</h2>
-        <p id="feed-empty" class="empty">Esperando actividad de Claude Code…</p>
+        <h2 data-i18n="panel.activity"></h2>
+        <p id="feed-empty" class="empty" data-i18n="panel.waiting"></p>
         <ul id="feed" class="feed" aria-live="off"></ul>
       </section>
       <section class="legend-section">
         <details>
-          <summary>Leyenda</summary>
+          <summary data-i18n="panel.legend"></summary>
           <ul id="legend" class="legend"></ul>
         </details>
       </section>
+      <nav class="panel-links" data-i18n-aria="top.links">
+        <a class="btn link" href="./help" target="_blank" rel="noopener" data-i18n="top.help" data-i18n-title="top.helpTitle"></a>
+        <a class="btn link" href="./architecture" target="_blank" rel="noopener" data-i18n="top.architecture" data-i18n-title="top.architectureTitle"></a>
+      </nav>
     </aside>
 
     <script type="module" src="./src/main.ts"></script>

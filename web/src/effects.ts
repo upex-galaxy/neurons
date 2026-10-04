@@ -2,8 +2,9 @@
 // halos, session rings, satellites outside the repo and the pink flash of moves.
 import { Color } from 'three';
 import { ACTION_COLORS, EXTERNAL_COLOR, FAIL_COLOR, type TreeEntry, type VizEvent } from '../../src/shared/types.ts';
+import { trailDuration } from './linkGlow.ts';
 import { BACKGROUND, type ParticleStyle, type Renderer } from './renderer.ts';
-import { ROOT_ID, normalizePath, parentPath, type TreeModel } from './treeModel.ts';
+import { ROOT_ID, normalizePath, parentPath, type TreeModel, type VizLink } from './treeModel.ts';
 
 export const HOP_INTERVAL_MS = 80;
 /** ~5.5 frames per hop at 60 fps, about 90 ms. */
@@ -23,6 +24,8 @@ interface EventStyle {
   halo?: string;
   /** Session hue on the target node (main-agent events, several sessions active). */
   ring?: string;
+  /** How long the crossed links stay tinted after arrival (0 = no trail). */
+  trail: number;
 }
 
 export interface EffectsContext {
@@ -49,15 +52,16 @@ export function dim(hex: string, amount: number): string {
 }
 
 function styleFor(event: VizEvent, halo: string | undefined): EventStyle {
-  const withHalo = (s: EventStyle): EventStyle => {
-    if (!halo) return s;
-    return { ...s, halo, particle: { ...s.particle, halo } };
+  const trail = trailDuration(event.action, event.phase);
+  const withHalo = (s: Omit<EventStyle, 'trail'>): EventStyle => {
+    if (!halo) return { ...s, trail };
+    return { ...s, trail, halo, particle: { ...s.particle, halo } };
   };
   if (event.phase === 'fail') {
     return withHalo({ particle: { color: FAIL_COLOR, width: 2, speed: PARTICLE_SPEED }, pulse: 0.9, blinks: 3, color: FAIL_COLOR });
   }
   if (event.external) {
-    return { particle: { color: EXTERNAL_COLOR, width: 1.5, speed: PARTICLE_SPEED }, pulse: 0.5, blinks: 0, color: EXTERNAL_COLOR };
+    return { particle: { color: EXTERNAL_COLOR, width: 1.5, speed: PARTICLE_SPEED }, pulse: 0.5, blinks: 0, color: EXTERNAL_COLOR, trail };
   }
   const color = ACTION_COLORS[event.action];
   if (event.phase === 'pre') {
@@ -91,6 +95,15 @@ function lightPath(ctx: EffectsContext, later: Later, path: string, style: Event
   }
   const arrival = hops === 0 ? 0 : (hops - 1) * HOP_INTERVAL_MS + HOP_TRAVEL_MS;
   later(() => {
+    if (style.trail > 0 && hops > 0) {
+      // The path stays tinted once the light got there, fading slowly.
+      const links: VizLink[] = [];
+      for (let i = 0; i < hops; i++) {
+        const link = ctx.model.link(chain[i]!, chain[i + 1]!);
+        if (link) links.push(link);
+      }
+      if (links.length) ctx.view().trailLinks(links, style.color, style.trail);
+    }
     const opts = {
       intensity: style.pulse,
       blinks: style.blinks,
@@ -152,7 +165,7 @@ export function playEvent(ctx: EffectsContext, event: VizEvent): void {
   if (event.action === 'move' && event.phase !== 'pre') {
     const pink = ACTION_COLORS.move;
     for (const p of event.fromPaths?.slice(0, MAX_PATHS_PER_EVENT) ?? []) {
-      const fromStyle = { ...style, particle: { ...style.particle, color: dim(style.color, 0.5) }, pulse: style.pulse * 0.4 };
+      const fromStyle = { ...style, particle: { ...style.particle, color: dim(style.color, 0.5) }, pulse: style.pulse * 0.4, trail: 0 };
       lightPath(ctx, later, p, fromStyle, onEmit);
       flashInto(ctx, later, p, pink, false);
     }

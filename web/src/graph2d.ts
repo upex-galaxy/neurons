@@ -4,6 +4,7 @@ import ForceGraph from 'force-graph';
 import { Color } from 'three';
 import { GlowBook, idleColor, newSample, type GlowSample } from './glow.ts';
 import { DAG_LEVEL_DISTANCE } from './graph3d.ts';
+import { TrailBook } from './linkGlow.ts';
 import { ParticleTrack } from './particles2d.ts';
 import {
   BACKGROUND,
@@ -21,6 +22,10 @@ const LINK_RGBA = 'rgba(58, 86, 128, 0.35)';
 const IDLE_BOOST_2D = 2.1;
 /** force-graph sizes nodes as sqrt(val) * relSize. */
 const REL_SIZE = 1;
+const ALPHA_DECAY = 0.0228;
+const CALM_ALPHA_DECAY = 0.08;
+/** Zoom the 2D view eases to (at least) when focusing a node. */
+const FOCUS_ZOOM = 2.4;
 
 interface LinkFlash {
   link: VizLink;
@@ -43,6 +48,9 @@ function endpoint(end: string | VizNode): VizNode | null {
 export function createGraph2D(container: HTMLElement, opts: RendererOptions): Renderer {
   const book = new GlowBook();
   const flashes: LinkFlash[] = [];
+  const linksByKey = new Map<string, VizLink>();
+  const trails = new TrailBook<null>(() => null);
+  let calmTimer: ReturnType<typeof setTimeout> | null = null;
   /** Own particle list: force-graph photons are wiped by graphData() and share one style per link. */
   const particles = new ParticleTrack();
   /** Per-frame samples of glowing nodes, filled in onRenderFramePre. */
@@ -54,6 +62,7 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
   let firstLayoutDone = false;
   let zoomPending = false;
   let disposed = false;
+  let paused = false;
   let nodesById = new Map<string, VizNode>();
 
   const scratch = new Color();
@@ -131,6 +140,7 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
       ctx.restore();
     })
     .onNodeClick((n: VizNode) => opts.onNodeClick(n))
+    .showPointerCursor((o: VizNode | VizLink | undefined) => !!o && 'kind' in o && opts.clickable(o))
     .linkColor(() => LINK_RGBA)
     .linkWidth(0.6)
     .linkDirectionalParticles(0)
@@ -142,9 +152,28 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
     .cooldownTicks(100)
     // Particles and glows animate even when the layout is still.
     .autoPauseRedraw(false)
-    .onRenderFramePre(() => {
+    .onRenderFramePre((ctx: CanvasRenderingContext2D, scale: number) => {
       // Sample glows once per frame; only glowing nodes are touched.
       const now = performance.now();
+      // Lingering trails: only the links that were touched.
+      if (trails.size) {
+        ctx.save();
+        ctx.lineWidth = 2.2 / Math.sqrt(scale);
+        ctx.lineCap = 'round';
+        trails.step(now, (trail, alpha) => {
+          const link = linksByKey.get(trail.key);
+          const s = link && endpoint(link.source);
+          const e = link && endpoint(link.target);
+          if (!s || !e) return;
+          ctx.globalAlpha = 0.8 * alpha;
+          ctx.strokeStyle = trail.color;
+          ctx.beginPath();
+          ctx.moveTo(s.x ?? 0, s.y ?? 0);
+          ctx.lineTo(e.x ?? 0, e.y ?? 0);
+          ctx.stroke();
+        });
+        ctx.restore();
+      }
       for (const id of [...book.ids()]) {
         const node = nodesById.get(id);
         let s = frameSamples.get(id);
@@ -232,12 +261,19 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
       } else {
         graph.warmupTicks(0);
       }
+      if (initial) trails.clear();
       graph.graphData(data);
       // Particles in flight survive structural updates on links that are still there.
       particles.retain(new Set(data.links));
-      return graph.graphData().links;
+      const live = graph.graphData().links;
+      linksByKey.clear();
+      for (const l of live) linksByKey.set(l.key, l);
+      for (const key of trails.keys()) if (!linksByKey.has(key)) trails.drop(key);
+      return live;
     },
     emitParticle(link, style) {
+      // Paused (the Timeline covers the graph): no frame prunes them, so they would pile up.
+      if (paused) return;
       particles.add(link, style, performance.now());
     },
     pulse(id, color, o) {
@@ -252,7 +288,27 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
       if (!book.has(id)) frameSamples.delete(id);
     },
     flashLink(link, color, durationMs) {
+      if (paused) return;
       flashes.push({ link, color, start: performance.now(), duration: durationMs });
+    },
+    trailLinks(links, color, durationMs) {
+      const now = performance.now();
+      for (const link of links) {
+        linksByKey.set(link.key, link);
+        trails.touch(link.key, color, durationMs, now);
+      }
+    },
+    focus(node, ms) {
+      graph.centerAt(node.x ?? 0, node.y ?? 0, ms);
+      if (graph.zoom() < FOCUS_ZOOM) graph.zoom(FOCUS_ZOOM, ms);
+    },
+    calm(ms) {
+      graph.d3AlphaDecay(CALM_ALPHA_DECAY);
+      if (calmTimer !== null) clearTimeout(calmTimer);
+      calmTimer = setTimeout(() => {
+        calmTimer = null;
+        if (!disposed) graph.d3AlphaDecay(ALPHA_DECAY);
+      }, ms);
     },
     forget(ids) {
       for (const id of ids) {
@@ -288,10 +344,18 @@ export function createGraph2D(container: HTMLElement, opts: RendererOptions): Re
     zoomToFit(ms = 600) {
       graph.zoomToFit(ms, 40);
     },
+    setPaused(p) {
+      if (p === paused || disposed) return;
+      paused = p;
+      if (p) graph.pauseAnimation();
+      else graph.width(container.clientWidth).height(container.clientHeight).resumeAnimation();
+    },
     dispose() {
       disposed = true;
       observer.disconnect();
       particles.clear();
+      trails.clear();
+      if (calmTimer !== null) clearTimeout(calmTimer);
       graph._destructor();
       container.replaceChildren();
     },

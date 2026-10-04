@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VizEvent } from '../../src/shared/types.ts';
 import type { Filters } from '../src/state.ts';
-import { EventStore, MAIN_AGENT, feedItem, heatIntensity, passes, pathTag } from '../src/store.ts';
+import { EventStore, MAIN_AGENT, RECORD_LIMIT, TRIM_CHUNK, feedItem, heatIntensity, passes, pathTag } from '../src/store.ts';
 
 let n = 0;
 function ev(partial: Partial<VizEvent>): VizEvent {
@@ -67,5 +67,25 @@ describe('worktree feed tag', () => {
     const item = feedItem(ev({ paths: ['web/src/main.ts'] }));
     expect(item.worktree).toBeUndefined();
     expect(pathTag(item)).toBeUndefined();
+  });
+});
+
+describe('EventStore limit', () => {
+  it('drops the oldest records in chunks and counts each trim', () => {
+    const store = new EventStore();
+    const first = ev({});
+    store.add(first);
+    for (let i = 1; i < RECORD_LIMIT; i++) store.add(ev({}));
+    expect(store.size).toBe(RECORD_LIMIT);
+    expect(store.trims).toBe(0);
+    store.add(ev({}));
+    expect(store.trims).toBe(1);
+    expect(store.size).toBe(RECORD_LIMIT - TRIM_CHUNK);
+    expect(store.get(first.id)).toBeUndefined();
+    // The next trim only comes after another chunk of events.
+    for (let i = 0; i < TRIM_CHUNK; i++) store.add(ev({}));
+    expect(store.trims).toBe(1);
+    store.add(ev({}));
+    expect(store.trims).toBe(2);
   });
 });

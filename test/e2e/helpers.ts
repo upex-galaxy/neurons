@@ -4,8 +4,22 @@ import { expect, type APIRequestContext, type Page } from '@playwright/test';
 /** The subset of web/src/state.ts VizState the specs read (that module needs DOM types). */
 export interface VizStateLite {
   ready: boolean;
+  lang: 'en' | 'es';
+  panelWidth: number;
+  stream: { id: string; action: string; phase: string; text: string }[];
+  streamOn: boolean;
+  detail: string | null;
+  detailPath: string | null;
+  tools: {
+    skills: Record<string, number>;
+    mcp: Record<string, Record<string, number>>;
+    cli: Record<string, number>;
+    builtin: Record<string, number>;
+  };
   mode: 'live' | 'replay' | null;
   renderer: '3d' | '2d';
+  view: '3d' | '2d' | 'timeline';
+  timeline: { rows: number; marks: number; groups: number; turns: number; agents: number; following: boolean; rowPaths: string[] };
   nodeCount: number;
   visibleNodeCount: number;
   active: string[];

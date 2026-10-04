@@ -17,7 +17,7 @@ interface ReadPost {
   tool_response: { file: { filePath: string; content: string } };
 }
 
-test('2.000 archivos a 30 fps o más con eventos en vivo (con GPU)', async ({ page, request }) => {
+test('2,000 files at 30 fps or more with live events (with a GPU)', async ({ page, request }) => {
   test.setTimeout(120_000);
   const repo = e2eRepo('perf');
   // run1 line 6 is a real PostToolUse(Read); it is re-aimed at the synthetic files.
@@ -35,7 +35,7 @@ test('2.000 archivos a 30 fps o más con eventos en vivo (con GPU)', async ({ pa
       getParameter(p: number): unknown;
       RENDERER: number;
     } | null;
-    if (!gl) return 'sin WebGL';
+    if (!gl) return 'no WebGL';
     const ext = gl.getExtension('WEBGL_debug_renderer_info');
     return String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
   });
@@ -79,14 +79,14 @@ test('2.000 archivos a 30 fps o más con eventos en vivo (con GPU)', async ({ pa
   const avg = Math.round(samples.reduce((a, b) => a + b, 0) / Math.max(1, samples.length));
 
   const after = await vizState(page);
-  const summary = `renderer="${gpu}", nodos=${after.nodeCount} (visibles ${after.visibleNodeCount}), eventos=${sent}, fps mediana=${median} media=${avg} mínimo=${min}`;
+  const summary = `renderer="${gpu}", nodes=${after.nodeCount} (visible ${after.visibleNodeCount}), events=${sent}, fps median=${median} mean=${avg} min=${min}`;
   console.log(`[perf] ${summary}`);
   test.info().annotations.push({ type: 'fps', description: summary });
 
   // Every Read reached the page.
   expect(counter(after, 'read')).toBeGreaterThanOrEqual(sent - 1);
 
-  const software = /swiftshader|llvmpipe|software/i.test(gpu) || gpu === 'sin WebGL';
-  test.skip(software, `WebGL por software (${gpu}): fps medido ${median}, sin exigir ${MIN_FPS}`);
+  const software = /swiftshader|llvmpipe|software/i.test(gpu) || gpu === 'no WebGL';
+  test.skip(software, `software WebGL (${gpu}): measured ${median} fps, ${MIN_FPS} not required`);
   expect(median).toBeGreaterThanOrEqual(MIN_FPS);
 });

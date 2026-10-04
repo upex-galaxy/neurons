@@ -1,6 +1,7 @@
 // Replay controller: loads /api/log, rebuilds the tree of the chosen segment and plays
 // events and tree deltas on a compressed clock scaled by speed (1x/2x/5x).
 import type { LogLine, TreeEntry, TreeSnapshot, VizEvent } from '../../src/shared/types.ts';
+import { t, tn, type Params } from './i18n.ts';
 import { formatClock } from './panel.ts';
 import { MAX_GAP_MS, buildTimeline, indexAt, segmentStarts, type Timeline } from './replayTimeline.ts';
 import { vizState } from './state.ts';
@@ -46,6 +47,8 @@ export class ReplayController {
   private raf = 0;
   private last = 0;
   private canExit = true;
+  /** Message key and params, kept so a language change can redraw it. */
+  private message: { key: string; params?: Params } | null = null;
 
   private readonly bar = el('replay-bar');
   private readonly playBtn = el<HTMLButtonElement>('rp-play');
@@ -87,6 +90,20 @@ export class ReplayController {
     return vizState.replay.active;
   }
 
+  /**
+   * Original epoch ms at the playhead: the last applied line's time plus the playhead's
+   * progress since, never past the next line. Null without a loaded timeline.
+   */
+  get clockTs(): number | null {
+    const tl = this.timeline;
+    if (!tl) return null;
+    const cur = this.index > 0 ? tl.items[this.index - 1] : undefined;
+    const next = tl.items[this.index];
+    const base = cur ? cur.ts : tl.startTs;
+    const ts = base + Math.max(0, this.playhead - (cur?.t ?? 0));
+    return next ? Math.min(ts, Math.max(base, next.ts)) : ts;
+  }
+
   /** Loads the log and starts playing from the first segment. */
   async start(opts: { canExit: boolean }): Promise<void> {
     this.canExit = opts.canExit;
@@ -95,33 +112,28 @@ export class ReplayController {
     document.body.classList.add('replaying');
     vizState.replay.active = true;
     vizState.mode = 'replay';
-    this.setMessage('Cargando log…');
+    this.setMessage('replay.loading');
     let lines: LogLine[];
     try {
       const res = await fetch('./api/log', { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body: unknown = await res.json();
-      if (!Array.isArray(body)) throw new Error('formato inesperado');
+      if (!Array.isArray(body)) throw new Error(t('replay.badFormat'));
       lines = body as LogLine[];
     } catch (err) {
-      this.setMessage(`No se pudo cargar el log (${err instanceof Error ? err.message : String(err)}).`);
+      this.setMessage('replay.loadError', { error: err instanceof Error ? err.message : String(err) });
       this.updateUi();
       return;
     }
     this.lines = lines;
     const starts = segmentStarts(lines);
-    this.segSel.replaceChildren(
-      ...starts.map((idx, i) => {
-        const line = lines[idx] as Extract<LogLine, { kind: 'tree' }>;
-        return new Option(`Tramo ${i + 1} · ${formatClock(line.ts).slice(0, 8)}`, String(i));
-      }),
-    );
+    this.fillSegments();
     this.segSel.hidden = starts.length < 2;
     this.segment = 0;
     this.segSel.value = '0';
     vizState.replay.segments = Math.max(1, starts.length);
     if (!this.rebuild()) return;
-    this.setMessage(lines.length ? '' : 'El log está vacío.');
+    this.setMessage(lines.length ? '' : 'replay.empty');
     this.play();
   }
 
@@ -129,7 +141,7 @@ export class ReplayController {
   private rebuild(): boolean {
     const tl = buildTimeline(this.lines, this.segment, this.host.fallbackTree());
     if (!tl) {
-      this.setMessage('El log no tiene un árbol inicial.');
+      this.setMessage('replay.noTree');
       this.timeline = null;
       this.updateUi();
       return false;
@@ -139,11 +151,7 @@ export class ReplayController {
     this.index = 0;
     this.host.begin(tl.tree);
     this.host.commit();
-    this.note.hidden = tl.compressedGaps === 0;
-    this.note.textContent =
-      tl.compressedGaps === 0
-        ? ''
-        : `${tl.compressedGaps} ${tl.compressedGaps === 1 ? 'pausa' : 'pausas'} de más de ${MAX_GAP_MS / 1000} s ${tl.compressedGaps === 1 ? 'acortada' : 'acortadas'} a ${MAX_GAP_MS / 1000} s (−${mmss(tl.savedMs)})`;
+    this.renderNote();
     vizState.replay.segment = this.segment;
     vizState.replay.compressedGaps = tl.compressedGaps;
     this.updateUi();
@@ -242,9 +250,39 @@ export class ReplayController {
     }
   }
 
-  private setMessage(text: string): void {
+  private setMessage(key: string, params?: Params): void {
+    this.message = key ? { key, ...(params ? { params } : {}) } : null;
+    const text = key ? t(key, params) : '';
     this.msg.textContent = text;
     this.msg.hidden = !text;
+  }
+
+  private fillSegments(): void {
+    const lines = this.lines;
+    const starts = segmentStarts(lines);
+    this.segSel.replaceChildren(
+      ...starts.map((idx, i) => {
+        const line = lines[idx] as Extract<LogLine, { kind: 'tree' }>;
+        return new Option(t('replay.segment', { n: i + 1, time: formatClock(line.ts).slice(0, 8) }), String(i));
+      }),
+    );
+    this.segSel.value = String(this.segment);
+  }
+
+  private renderNote(): void {
+    const tl = this.timeline;
+    const gaps = tl?.compressedGaps ?? 0;
+    this.note.hidden = gaps === 0;
+    this.note.textContent =
+      gaps === 0 || !tl ? '' : tn('replay.gaps', gaps, { max: MAX_GAP_MS / 1000, saved: mmss(tl.savedMs) });
+  }
+
+  /** Redraws the generated strings after a language change. */
+  relabel(): void {
+    if (this.message) this.setMessage(this.message.key, this.message.params);
+    if (this.lines.length) this.fillSegments();
+    this.renderNote();
+    this.updateUi();
   }
 
   private updateUi(): void {
@@ -262,12 +300,12 @@ export class ReplayController {
     const frac = duration > 0 ? this.playhead / duration : total > 0 && this.index >= total ? 1 : 0;
     this.fill.style.transform = `scaleX(${frac.toFixed(4)})`;
     this.progress.setAttribute('aria-valuenow', String(Math.round(frac * 100)));
-    const t = `${mmss(this.playhead)} / ${mmss(duration)}`;
-    if (this.time.textContent !== t) this.time.textContent = t;
+    const timeText = `${mmss(this.playhead)} / ${mmss(duration)}`;
+    if (this.time.textContent !== timeText) this.time.textContent = timeText;
     const cur = tl?.items[Math.max(0, this.index - 1)];
     const c = cur ? formatClock(cur.ts).slice(0, 8) : tl ? formatClock(tl.startTs).slice(0, 8) : '';
     if (this.clock.textContent !== c) this.clock.textContent = c;
-    const label = this.playing ? 'Pausa' : 'Reproducir';
+    const label = t(this.playing ? 'replay.pause' : 'replay.play');
     if (this.playBtn.textContent !== label) this.playBtn.textContent = label;
     this.playBtn.setAttribute('aria-pressed', String(this.playing));
     for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {

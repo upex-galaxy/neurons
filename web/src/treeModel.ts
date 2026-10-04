@@ -202,7 +202,7 @@ export class TreeModel {
     const created: VizNode[] = [];
     const path = normalizePath(abs);
     if (!this.nodes.has(OUTSIDE_HUB_ID)) {
-      const hub: VizNode = { id: OUTSIDE_HUB_ID, kind: 'dir', depth: 0, name: 'fuera del repo', parentId: null, outside: true };
+      const hub: VizNode = { id: OUTSIDE_HUB_ID, kind: 'dir', depth: 0, name: 'outside', parentId: null, outside: true };
       this.attach(hub);
       created.push(hub);
     }

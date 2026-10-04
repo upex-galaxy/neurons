@@ -28,6 +28,7 @@ function fakeView(calls: string[], pulses: Array<{ id: string; opts: PulseOption
       pulses.push({ id, opts });
     },
     flashLink: (l) => calls.push(`flash:${l.key}`),
+    trailLinks: (links, color, ms) => calls.push(`trail:${links.map((l) => l.key).join(',')}:${color}:${ms}`),
   } as Partial<Renderer> as Renderer;
 }
 
@@ -150,6 +151,36 @@ describe('playEvent timers', () => {
     expect(calls).toContain('particle:src->src/api');
     expect(calls).toContain('pulse:src/api');
     expect(calls.some((c) => c.includes('only-here'))).toBe(false);
+  });
+
+  it('leaves a lingering trail on the crossed links once the light arrives', () => {
+    const { ctx, calls } = setup();
+    playEvent(ctx, event({ action: 'edit', paths: ['src/api/user.ts'] }));
+    vi.advanceTimersByTime(100);
+    expect(calls.some((c) => c.startsWith('trail:'))).toBe(false);
+    vi.advanceTimersByTime(2000);
+    expect(calls).toContain('trail:->src,src->src/api,src/api->src/api/user.ts:#f59e0b:7000');
+  });
+
+  it('leaves no trail for a pre and a shorter one for reads', () => {
+    const { ctx, calls } = setup();
+    playEvent(ctx, event({ phase: 'pre', paths: ['src/api/user.ts'] }));
+    vi.advanceTimersByTime(2000);
+    expect(calls.some((c) => c.startsWith('trail:'))).toBe(false);
+    playEvent(ctx, event({ paths: ['src/api/user.ts'] }));
+    vi.advanceTimersByTime(2000);
+    expect(calls.find((c) => c.startsWith('trail:'))).toMatch(/:5000$/);
+  });
+
+  it('a skill outside the repo travels to its satellite; an MCP call without paths draws nothing', () => {
+    const { ctx, calls } = setup();
+    playEvent(ctx, event({ action: 'mcp', paths: [], detail: 'context7/resolve-library-id' }));
+    vi.advanceTimersByTime(2000);
+    expect(calls).toEqual([]);
+    ctx.model.addOutside('/Users/x/.claude/skills/humanizer/SKILL.md');
+    playEvent(ctx, event({ action: 'skill', paths: [], outsideRepo: ['/Users/x/.claude/skills/humanizer/SKILL.md'] }));
+    vi.advanceTimersByTime(2000);
+    expect(calls).toContain('pulse:/Users/x/.claude/skills/humanizer/SKILL.md');
   });
 
   it('drops pending hops, pulses and flashes after a reset (replay seek, reconnect)', () => {

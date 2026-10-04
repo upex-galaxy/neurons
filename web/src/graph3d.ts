@@ -20,6 +20,7 @@ import {
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { GlowBook, idleColor, newSample } from './glow.ts';
+import { TrailBook } from './linkGlow.ts';
 import {
   BACKGROUND,
   LINK_COLOR,
@@ -36,6 +37,12 @@ type Graph = ForceGraph3DInstance<VizNode, VizLink>;
 
 const BLOOM = { strength: 1.4, radius: 0.6, threshold: 0.05 };
 export const DAG_LEVEL_DISTANCE = 40;
+/** d3 default alpha decay, and the faster one used while calm() runs. */
+const ALPHA_DECAY = 0.0228;
+const CALM_ALPHA_DECAY = 0.08;
+/** Closest the camera gets when easing toward a node. */
+const FOCUS_MIN_DISTANCE = 200;
+const FOCUS_MAX_DISTANCE = 520;
 
 // Unit spheres scaled per node, shared by every node (the library may dispose them on
 // node removal; three re-uploads them on the next frame).
@@ -103,11 +110,40 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
   const meshes = new Map<string, NodeMesh>();
   const book = new GlowBook();
   const flashes: LinkFlash[] = [];
+  const linksByKey = new Map<string, VizLink>();
+  const newLine = (color: string): Line<BufferGeometry, LineBasicMaterial> => {
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+    const material = new LineBasicMaterial({
+      color: new Color(color).multiplyScalar(1.6),
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: AdditiveBlending,
+    });
+    const line = new Line(geometry, material);
+    line.frustumCulled = false;
+    return line;
+  };
+  const trails = new TrailBook<Line<BufferGeometry, LineBasicMaterial>>(
+    (_key, color) => {
+      const line = newLine(color);
+      graph.scene().add(line);
+      return line;
+    },
+    (line) => {
+      line.removeFromParent();
+      line.geometry.dispose();
+      line.material.dispose();
+    },
+  );
+  let calmTimer: ReturnType<typeof setTimeout> | null = null;
   const firstLayoutCbs: Array<() => void> = [];
   let firstLayoutDone = false;
   let zoomPending = false;
   let zoomedAfterWarmup = false;
   let disposed = false;
+  let paused = false;
   let rafId = 0;
 
   // Particles: shared geometry per width and shared material per color+width. The library
@@ -163,6 +199,7 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
     .nodeLabel((n: VizNode) => `<span class="node-tip">${opts.label(n)}</span>`)
     .nodeThreeObject(makeNodeObject)
     .onNodeClick((n: VizNode) => opts.onNodeClick(n))
+    .showPointerCursor((o: VizNode | VizLink | undefined) => !!o && 'kind' in o && opts.clickable(o))
     .linkColor(() => LINK_COLOR)
     .linkWidth(0)
     .linkOpacity(0.25)
@@ -290,7 +327,23 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
       pos.needsUpdate = true;
       f.line.material.opacity = 1 - t;
     }
-    rafId = requestAnimationFrame(frame);
+    // Lingering trails: only the links that were touched.
+    trails.step(now, (trail, alpha) => {
+      const link = linksByKey.get(trail.key);
+      const s = link && endpoint(link.source);
+      const e = link && endpoint(link.target);
+      if (!s || !e) {
+        trail.data.visible = false;
+        return;
+      }
+      const pos = trail.data.geometry.getAttribute('position') as Float32BufferAttribute;
+      pos.setXYZ(0, s.x ?? 0, s.y ?? 0, s.z ?? 0);
+      pos.setXYZ(1, e.x ?? 0, e.y ?? 0, e.z ?? 0);
+      pos.needsUpdate = true;
+      trail.data.visible = true;
+      trail.data.material.opacity = 0.85 * alpha;
+    });
+    rafId = paused ? 0 : requestAnimationFrame(frame);
   };
   rafId = requestAnimationFrame(frame);
 
@@ -314,13 +367,21 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
         // Structural updates must not block the main thread with a new warmup.
         graph.warmupTicks(0);
       }
+      if (initial) trails.clear();
       graph.graphData(data);
       // Meshes of nodes no longer in the graph were disposed by the library.
       const inGraph = new Set(data.nodes.map((n) => n.id));
       for (const id of meshes.keys()) if (!inGraph.has(id)) meshes.delete(id);
-      return graph.graphData().links;
+      const live = graph.graphData().links;
+      linksByKey.clear();
+      for (const l of live) linksByKey.set(l.key, l);
+      for (const key of trails.keys()) if (!linksByKey.has(key)) trails.drop(key);
+      return live;
     },
     emitParticle(link, style) {
+      // Paused (the Timeline covers the graph): the library moves and removes photons only
+      // in its tick, so they would pile up and all fly at once on resume.
+      if (paused) return;
       const holder = (link as { __singleHopPhotonsObj?: Object3D }).__singleHopPhotonsObj;
       // A photon group left over from a previous graph instance would never render.
       if (holder && holder.parent !== fgRoot()) delete (link as { __singleHopPhotonsObj?: Object3D }).__singleHopPhotonsObj;
@@ -346,6 +407,8 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
       applyIdle(mesh);
     },
     flashLink(link, color, durationMs) {
+      // Paused: frame() would not fade it, and it would show at full strength on resume.
+      if (paused) return;
       const s = endpoint(link.source);
       const e = endpoint(link.target);
       if (!s || !e) return;
@@ -362,6 +425,31 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
       line.frustumCulled = false;
       graph.scene().add(line);
       flashes.push({ line, link, start: performance.now(), duration: durationMs });
+    },
+    trailLinks(links, color, durationMs) {
+      const now = performance.now();
+      for (const link of links) {
+        linksByKey.set(link.key, link);
+        const { trail, recolor } = trails.touch(link.key, color, durationMs, now);
+        if (recolor) trail.data.material.color.set(color).multiplyScalar(1.6);
+      }
+    },
+    focus(node, ms) {
+      const target = new Vector3(node.x ?? 0, node.y ?? 0, node.z ?? 0);
+      const cam = graph.camera().position.clone();
+      const dir = cam.sub(target);
+      const dist = dir.length() || FOCUS_MAX_DISTANCE;
+      dir.setLength(Math.max(FOCUS_MIN_DISTANCE, Math.min(FOCUS_MAX_DISTANCE, dist * 0.85)));
+      const pos = target.clone().add(dir);
+      graph.cameraPosition({ x: pos.x, y: pos.y, z: pos.z }, { x: target.x, y: target.y, z: target.z }, ms);
+    },
+    calm(ms) {
+      graph.d3AlphaDecay(CALM_ALPHA_DECAY);
+      if (calmTimer !== null) clearTimeout(calmTimer);
+      calmTimer = setTimeout(() => {
+        calmTimer = null;
+        if (!disposed) graph.d3AlphaDecay(ALPHA_DECAY);
+      }, ms);
     },
     forget(ids) {
       for (const id of ids) {
@@ -400,6 +488,19 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
     zoomToFit(ms = 600) {
       graph.zoomToFit(ms, 60);
     },
+    setPaused(p) {
+      if (p === paused || disposed) return;
+      paused = p;
+      if (p) {
+        graph.pauseAnimation();
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      } else {
+        resize();
+        graph.resumeAnimation();
+        rafId = requestAnimationFrame(frame);
+      }
+    },
     dispose() {
       disposed = true;
       cancelAnimationFrame(rafId);
@@ -409,6 +510,8 @@ export function createGraph3D(container: HTMLElement, opts: RendererOptions): Re
         f.line.material.dispose();
       }
       flashes.length = 0;
+      trails.clear();
+      if (calmTimer !== null) clearTimeout(calmTimer);
       graph._destructor();
       const webgl = graph.renderer();
       webgl.dispose();

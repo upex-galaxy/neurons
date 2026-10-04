@@ -1,6 +1,8 @@
 // Observable page state for tests and debugging: window.__vizState and window.__viz.
 import type { Action, Phase, ServerMessage } from '../../src/shared/types.ts';
-import type { RendererKind } from './renderer.ts';
+import type { Lang } from './i18n.ts';
+import type { RendererKind, ViewKind } from './renderer.ts';
+import type { ToolsSnapshot } from './tools.ts';
 
 export interface FeedItem {
   id: string;
@@ -13,6 +15,8 @@ export interface FeedItem {
   /** First repo path, or the first outside path, or "" when the event has none. */
   path: string;
   detail?: string;
+  /** PermissionDenied (VizEvent.denied): the UI words it in its own language. */
+  denied?: boolean;
   external?: boolean;
   /** Claude Code worktree the path came from (VizEvent.worktree): `path` is the main-repo equivalent. */
   worktree?: string;
@@ -43,8 +47,45 @@ export interface ReplayState {
   segments: number;
 }
 
+/** One line of the floating "now" stream. */
+export interface StreamState {
+  id: string;
+  action: Action;
+  phase: Phase;
+  text: string;
+}
+
+/** Timeline view counters (for the current filter). */
+export interface TimelineState {
+  rows: number;
+  marks: number;
+  groups: number;
+  turns: number;
+  agents: number;
+  /** The view keeps "now" at the right edge. */
+  following: boolean;
+  /** Row paths in display order (at most 300). */
+  rowPaths: string[];
+}
+
 export interface VizState {
   ready: boolean;
+  /** What fills the stage. `renderer` keeps the graph kind underneath the Timeline. */
+  view: ViewKind;
+  timeline: TimelineState;
+  lang: Lang;
+  /** Side panel width in px (wide screens; the bottom sheet ignores it). */
+  panelWidth: number;
+  /** Lines in the floating "now" stream, oldest first. */
+  stream: StreamState[];
+  /** The "Live stream" toggle. */
+  streamOn: boolean;
+  /** Event shown in the detail drawer, or null. */
+  detail: string | null;
+  /** File whose activity list the drawer shows, or null. */
+  detailPath: string | null;
+  /** Tools section counters for the current filter (finished calls). */
+  tools: ToolsSnapshot;
   mode: 'live' | 'replay' | null;
   renderer: RendererKind;
   nodeCount: number;
@@ -79,8 +120,14 @@ export interface VizState {
 export interface VizApi {
   inject(msg: ServerMessage): void;
   setRenderer(kind: RendererKind): void;
+  setView(kind: ViewKind): void;
   setFilters(f: Partial<Filters>): void;
   toggleCollapse(id: string): void;
+  setLang(lang: Lang): void;
+  openDetail(id: string): void;
+  openFile(path: string): void;
+  closeDetail(): void;
+  setPanelWidth(px: number): void;
   replay: {
     start(): Promise<void>;
     play(): void;
@@ -117,9 +164,26 @@ export function emptyReplay(): ReplayState {
   };
 }
 
+export function emptyTools(): ToolsSnapshot {
+  return { skills: {}, mcp: {}, cli: {}, builtin: {} };
+}
+
+export function emptyTimeline(): TimelineState {
+  return { rows: 0, marks: 0, groups: 0, turns: 0, agents: 0, following: true, rowPaths: [] };
+}
+
 export function createState(): VizState {
   return {
     ready: false,
+    view: '3d',
+    timeline: emptyTimeline(),
+    lang: 'en',
+    panelWidth: 360,
+    stream: [],
+    streamOn: true,
+    detail: null,
+    detailPath: null,
+    tools: emptyTools(),
     mode: null,
     renderer: '3d',
     nodeCount: 0,
@@ -154,8 +218,12 @@ export function resetState(): void {
   fresh.connected = vizState.connected;
   fresh.fps = vizState.fps;
   fresh.renderer = vizState.renderer;
+  fresh.view = vizState.view;
   fresh.filters = vizState.filters;
   fresh.replay = vizState.replay;
+  fresh.lang = vizState.lang;
+  fresh.panelWidth = vizState.panelWidth;
+  fresh.streamOn = vizState.streamOn;
   Object.assign(vizState, fresh);
 }
 
