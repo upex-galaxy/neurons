@@ -263,6 +263,18 @@ describe('startWatcher', () => {
     expect(s.changes.find((c) => c.type === 'move')).toMatchObject({ path: 'final.txt', from: 'draft.txt' });
   });
 
+  // Regression (Linux CI): inotify reports a touch at once; a rename a few ms later fell in
+  // the same batch and the move kept the touch's time, before the Bash window that made it.
+  it('dates a move by its last raw event, not by an earlier touch in the same batch', async () => {
+    const s = await setup({ 'old.txt': 'o', 'keep.txt': 'k' });
+    age(s.root, 'old.txt');
+    await sleep(5); // inside the coalescing window
+    const before = Date.now();
+    fs.renameSync(path.join(s.root, 'old.txt'), path.join(s.root, 'new.txt'));
+    await waitFor(() => has(s.changes, 'move', 'new.txt'));
+    expect(s.changes.find((c) => c.type === 'move')?.ts).toBeGreaterThanOrEqual(before);
+  });
+
   // On ext4 the new file often gets the inode number just freed: the birth time check keeps
   // the recorded inode from pairing them.
   it('does not pair a delete with an unrelated new file', async () => {

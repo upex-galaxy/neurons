@@ -158,7 +158,9 @@ export function startWatcher(opts: WatcherOptions): WatcherHandle {
     // A default-excluded path the index knows anyway (put there by a hook) must still be
     // able to leave it.
     if (excluded(rel) && !(rel !== '' && !isAlwaysExcluded(rel) && index.has(rel))) return;
-    if (!pending.has(rel)) pending.set(rel, Date.now());
+    // The last raw event dates the change: inotify reports a touch at once, and a rename
+    // 10 ms later in the same batch must not be dated before the Bash window that made it.
+    pending.set(rel, Date.now());
     if (!timer) timer = setTimeout(schedule, coalesceMs);
   }
 
